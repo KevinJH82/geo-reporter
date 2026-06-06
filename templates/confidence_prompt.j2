@@ -1,0 +1,54 @@
+你是一位资深矿产勘查专家，需要对研究区"{{ mineral_type if mineral_type else "目标矿种" }}"的找矿前景进行综合置信评价。你的判断必须严格基于下方各方面资料，用证据说话，严禁空泛。
+
+【研究区信息】
+位置：{{ location_str }}（{{ country }}）
+坐标范围：{{ coords_str }}
+区块名称：{{ area_name }}
+目标矿种：{{ mineral_type if mineral_type else "未指定" }}
+
+【各章节证据摘要】
+{% for ev in evidence %}
+=== {{ ev.name }} ===
+数据状态：{{ "✅ 有数据" if ev.has_data else "⚠️ 数据缺失/未获取" }}{% if ev.from_subsystem %}（含子系统本地实证）{% endif %}
+概述：{{ ev.summary if ev.summary else "（无）" }}
+关键发现：
+{% for kf in ev.key_findings %}  - {{ kf }}
+{% endfor %}
+{% endfor %}
+
+【子系统本地实证可用性】
+- geo-stru 构造解译：{{ "可用" if subsystems.structural else "无匹配数据" }}
+- data-colle 地质/物探/化探资料：{{ "可用" if subsystems.datacolle else "无匹配数据" }}
+- geo-analyser 蚀变分析：{{ "可用" if subsystems.alteration else "无匹配数据" }}
+- geo-exploration 深部探测靶区：{{ "可用，识别靶区 " ~ subsystems.n_targets ~ " 个" if subsystems.exploration else "无匹配数据" }}
+
+【评价要求】
+针对"{{ mineral_type if mineral_type else "目标矿种" }}"，从以下维度逐项研判证据的有利程度（高/中/低/缺），再综合给出 A-B-C-D 四级置信评价（A 最高，找矿前景最有利且证据充分；D 最低，证据不足或不利）：
+1. 成矿地质条件（地层、构造、岩浆岩、成矿带）
+2. 地球物理证据（重磁异常与矿体/构造的对应）
+3. 地球化学证据（成矿元素异常强度、组合、浓集中心）
+4. 遥感蚀变证据（蚀变矿物组合及与成矿的关联）
+5. 深部探测与靶区（深部潜力、靶区数量与强度）
+6. 数据完整度与可信度（子系统本地实证 vs 仅网络资料）
+
+定级原则：证据越充分、越多源相互印证、与目标矿种成矿模型越吻合，等级越高。若多数维度"缺"或仅有网络资料，不得高于 C。
+
+【输出格式】
+只返回如下 JSON，不要输出任何其他文字：
+
+```json
+{
+  "grade": "A|B|C|D 之一",
+  "grade_label": "等级中文释义（如：有利/较有利/一般/不利）",
+  "summary": "150-250字综合研判结论，须点明对'{{ mineral_type }}'的找矿前景判断及主要依据",
+  "dimensions": [
+    {"name": "成矿地质条件", "level": "高|中|低|缺", "note": "依据（含具体证据）"},
+    {"name": "地球物理证据", "level": "高|中|低|缺", "note": "依据"},
+    {"name": "地球化学证据", "level": "高|中|低|缺", "note": "依据"},
+    {"name": "遥感蚀变证据", "level": "高|中|低|缺", "note": "依据"},
+    {"name": "深部探测与靶区", "level": "高|中|低|缺", "note": "依据"},
+    {"name": "数据完整度与可信度", "level": "高|中|低|缺", "note": "依据"}
+  ],
+  "recommendation": "下一步工作建议（80字以内）"
+}
+```
