@@ -406,18 +406,23 @@ class SearchEngine:
         for idx, cat_id in enumerate(cat_ids, 1):
             cat = cat_map[cat_id]
             batch_raw = {cat_id: raw_data[cat_id]}
-            # 确定性收集子系统图件（不经 LLM，避免幻觉）
-            figs = [
-                Figure(path=f["path"], caption=f["caption"], source=f["source"])
-                for f in collect_subsystem_figures(
-                    cat_id, location.min_lon, location.min_lat,
-                    location.max_lon, location.max_lat)
-            ]
-            # 在后台线程跑提取（claude -p 可能耗时数十秒），期间发 keepalive 心跳，避免 SSE 静默断连
+            # 在后台线程跑「图件收集 + claude 提取」（geology 图件需联网、claude -p 可能耗时数十秒），
+            # 主线程期间持续发 keepalive 心跳，避免任何联网/计算导致 SSE 静默断连
             _box: Dict = {}
             _done = threading.Event()
 
-            def _extract(_raw=batch_raw):
+            def _extract(_raw=batch_raw, _cid=cat_id):
+                # 确定性收集子系统图件（不经 LLM，避免幻觉）；失败不影响提取
+                try:
+                    _box["figs"] = [
+                        Figure(path=f["path"], caption=f["caption"], source=f["source"])
+                        for f in collect_subsystem_figures(
+                            _cid, location.min_lon, location.min_lat,
+                            location.max_lon, location.max_lat)
+                    ]
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[Figures] {_cid} 图件收集失败：{exc}")
+                    _box["figs"] = []
                 try:
                     _box["data"] = self._run_extraction_batch(_raw, location, category_names, mineral_type)
                 except Exception as exc:  # noqa: BLE001
@@ -428,6 +433,8 @@ class SearchEngine:
             threading.Thread(target=_extract, daemon=True).start()
             while not _done.wait(timeout=8):
                 yield ("keepalive", None, None, None)
+
+            figs = _box.get("figs", [])
 
             if "err" in _box:
                 yield idx, total, cat_id, SearchResult(

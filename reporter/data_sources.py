@@ -238,16 +238,58 @@ out body;
 # 子系统 broker 接入（commons/*_broker）——把兄弟子系统标准输出注入对应章节
 # ---------------------------------------------------------------------------
 
+def _repo_root() -> str:
+    """仓库根目录（geo-reporter 的上一级），基于本文件位置推导，兼容不同部署前缀。"""
+    from pathlib import Path
+    return str(Path(__file__).resolve().parents[2])
+
+
 def _import_commons():
-    """把 /opt/deepexplor-services 加入 sys.path 以导入 commons.* broker。"""
+    """把仓库根加入 sys.path 以导入 commons.* broker（兼容 /opt/Project 与 /opt 两种部署路径）。"""
     import sys
-    _repo = "/opt/deepexplor-services"
-    if _repo not in sys.path:
-        sys.path.insert(0, _repo)
+    for _repo in (_repo_root(), "/opt/deepexplor-services"):
+        if _repo not in sys.path:
+            sys.path.insert(0, _repo)
 
 
 def _bbox(min_lon, min_lat, max_lon, max_lat):
     return (min_lon, min_lat, max_lon, max_lat)
+
+
+# geo-stru 高清地质构造解译图：(metadata.products 键, 图注)
+_GEO_STRU_MAPS = [
+    ("map_hillshade_png", "山体阴影遥感地质构造解译图"),
+    ("map_terrain_png", "地形渲染遥感地质构造解译图"),
+    ("rose_diagram", "构造线方向玫瑰图"),
+]
+
+
+def _geo_stru_figures(bbox) -> List[dict]:
+    """取 geo-stru 对本研究区的高清地质构造解译图（本地实证，优先于公开地质图）；无则返回空。"""
+    _import_commons()
+    try:
+        from commons.structural_broker import find_structural_for_bbox, get_product_path
+    except Exception as e:
+        print(f"[Figures] geo-stru import 失败：{e}")
+        return []
+    outputs = _repo_root() + "/geo-stru/results"
+    try:
+        matches = find_structural_for_bbox(bbox, outputs)
+    except Exception as e:
+        print(f"[Figures] geo-stru 查询失败：{e}")
+        return []
+    if not matches:
+        return []
+    entry = matches[0]
+    aoi = entry.get("aoi_name", "")
+    figs: List[dict] = []
+    for key, caption in _GEO_STRU_MAPS:
+        p = get_product_path(entry, key)
+        if p:
+            figs.append({"path": p,
+                         "caption": f"{caption}（{aoi}，geo-stru 构造解译）",
+                         "source": "geo-stru"})
+    return figs
 
 
 def fetch_datacolle_section(section_id: str, min_lon, min_lat, max_lon, max_lat) -> List[str]:
@@ -340,7 +382,16 @@ def collect_subsystem_figures(category_id: str, min_lon, min_lat, max_lon, max_l
     figs: List[dict] = []
     bbox = _bbox(min_lon, min_lat, max_lon, max_lat)
     try:
-        if category_id == "geophysics":
+        if category_id == "geology":
+            # 优先 geo-stru 本地高清地质构造解译图（针对 ROI、本地实证）
+            figs.extend(_geo_stru_figures(bbox))
+            # 无本地解译图时，回退公开 Macrostrat 地质图（覆盖区，如北美）
+            if not figs:
+                from .geology_map import render_geology_map
+                geo_fig = render_geology_map(min_lon, min_lat, max_lon, max_lat)
+                if geo_fig:
+                    figs.append(geo_fig)
+        elif category_id == "geophysics":
             from commons.datacolle_broker import find_datacolle_for_bbox
             m = find_datacolle_for_bbox(bbox)
             if m:
