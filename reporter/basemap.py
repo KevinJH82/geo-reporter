@@ -88,6 +88,8 @@ def render_basemap(
     height_px: int = 600,
     targets: Optional[List[dict]] = None,
     draw_aoi_box: bool = True,
+    overlay_url_template: Optional[str] = None,
+    overlay_opacity: float = 1.0,
 ) -> Optional[str]:
     """
     渲染底图 PNG，返回临时文件路径；失败返回 None。
@@ -97,6 +99,9 @@ def render_basemap(
     location : LocationContext  （需含 min_lon/min_lat/max_lon/max_lat、centroid_lat/lon）
     targets : 可选靶区列表 [{longitude, latitude, rank, value}, ...]，叠加编号点与矩形框
     draw_aoi_box : 是否绘制研究区红框
+    overlay_url_template : 可选叠加图层 XYZ 瓦片模板（含 {z}{x}{y}，如 Macrostrat carto）；
+        与卫星+标注采用同一 Web-Mercator 切片方案，半透明叠加到底图上
+    overlay_opacity : 叠加图层不透明度（0~1），仅在 overlay_url_template 非空时生效
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -157,6 +162,21 @@ def render_basemap(
                         tile_img = Image.alpha_composite(tile_img, label_img)
                     except Exception:
                         pass
+                    # 可选叠加图层（如 Macrostrat 地质图瓦片，可能为 512²，统一缩放到 TILE_SIZE）
+                    if overlay_url_template:
+                        try:
+                            ov_url = overlay_url_template.format(z=zoom, x=tile_x, y=tile_y)
+                            req3 = urllib.request.Request(ov_url, headers={"User-Agent": "geo-reporter/0.1"})
+                            with urllib.request.urlopen(req3, timeout=8, context=ssl_ctx) as resp3:
+                                ov_img = Image.open(io.BytesIO(resp3.read())).convert("RGBA")
+                            if ov_img.size != (TILE_SIZE, TILE_SIZE):
+                                ov_img = ov_img.resize((TILE_SIZE, TILE_SIZE))
+                            if overlay_opacity < 1.0:
+                                alpha = ov_img.split()[3].point(lambda p: int(p * overlay_opacity))
+                                ov_img.putalpha(alpha)
+                            tile_img = Image.alpha_composite(tile_img, ov_img)
+                        except Exception:
+                            pass
                     canvas.paste(tile_img.convert("RGB"), (tx * TILE_SIZE, ty * TILE_SIZE))
                 except Exception:
                     pass
