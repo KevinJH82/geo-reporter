@@ -19,13 +19,8 @@ from jinja2 import Environment, FileSystemLoader
 
 from .categories import Figure, get_all_categories
 from .basemap import render_basemap
-
-
-def _import_commons():
-    import sys
-    _repo = "/opt/deepexplor-services"
-    if _repo not in sys.path:
-        sys.path.insert(0, _repo)
+from .data_sources import (_import_commons, GEO_STRU_OUTPUTS, DATACOLLE_OUTPUTS,
+                           GEO_ANALYSER_OUTPUTS, GEO_EXPLORATION_OUTPUTS)
 
 
 def _bbox(location):
@@ -43,7 +38,7 @@ def get_prospecting_targets(location) -> List[dict]:
         from commons.exploration_broker import find_exploration_for_bbox
     except Exception:
         return []
-    matches = find_exploration_for_bbox(_bbox(location))
+    matches = find_exploration_for_bbox(_bbox(location), GEO_EXPLORATION_OUTPUTS)
     if not matches:
         return []
     return matches[0].get("prospecting_targets", [])
@@ -115,22 +110,22 @@ def _subsystem_availability(location) -> dict:
              "exploration": False, "n_targets": 0}
     try:
         from commons.structural_broker import find_structural_for_bbox
-        avail["structural"] = bool(find_structural_for_bbox(bbox))
+        avail["structural"] = bool(find_structural_for_bbox(bbox, GEO_STRU_OUTPUTS))
     except Exception:
         pass
     try:
         from commons.datacolle_broker import find_datacolle_for_bbox
-        avail["datacolle"] = bool(find_datacolle_for_bbox(bbox))
+        avail["datacolle"] = bool(find_datacolle_for_bbox(bbox, DATACOLLE_OUTPUTS))
     except Exception:
         pass
     try:
         from commons.analyser_broker import find_alteration_for_bbox
-        avail["alteration"] = bool(find_alteration_for_bbox(bbox))
+        avail["alteration"] = bool(find_alteration_for_bbox(bbox, GEO_ANALYSER_OUTPUTS))
     except Exception:
         pass
     try:
         from commons.exploration_broker import find_exploration_for_bbox
-        m = find_exploration_for_bbox(bbox)
+        m = find_exploration_for_bbox(bbox, GEO_EXPLORATION_OUTPUTS)
         avail["exploration"] = bool(m)
         if m:
             avail["n_targets"] = len(m[0].get("prospecting_targets", []))

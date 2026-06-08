@@ -256,6 +256,16 @@ def _bbox(min_lon, min_lat, max_lon, max_lat):
     return (min_lon, min_lat, max_lon, max_lat)
 
 
+# 各兄弟子系统标准输出目录（基于真实仓库根推导）。
+# broker 内部默认写死 /opt/deepexplor-services/...，在本机不存在；所有 broker 调用必须显式传入下列路径。
+_ROOT = _repo_root()
+GEO_STRU_OUTPUTS        = _ROOT + "/geo-stru/results"
+DATACOLLE_OUTPUTS       = _ROOT + "/data-colle/prospector/output"
+GEO_ANALYSER_OUTPUTS    = _ROOT + "/geo-analyser/results"
+GEO_EXPLORATION_OUTPUTS = _ROOT + "/geo-exploration/Python_Project/web_app/uploads"
+GEO_INSAR_DOWNLOADS     = _ROOT + "/geo-insar/downloads"
+
+
 # geo-stru 高清地质构造解译图：(metadata.products 键, 图注)
 _GEO_STRU_MAPS = [
     ("map_hillshade_png", "山体阴影遥感地质构造解译图"),
@@ -272,9 +282,8 @@ def _geo_stru_figures(bbox) -> List[dict]:
     except Exception as e:
         print(f"[Figures] geo-stru import 失败：{e}")
         return []
-    outputs = _repo_root() + "/geo-stru/results"
     try:
-        matches = find_structural_for_bbox(bbox, outputs)
+        matches = find_structural_for_bbox(bbox, GEO_STRU_OUTPUTS)
     except Exception as e:
         print(f"[Figures] geo-stru 查询失败：{e}")
         return []
@@ -302,7 +311,7 @@ def fetch_datacolle_section(section_id: str, min_lon, min_lat, max_lon, max_lat)
         from commons.datacolle_broker import find_datacolle_for_bbox
     except Exception:
         return []
-    matches = find_datacolle_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat))
+    matches = find_datacolle_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), DATACOLLE_OUTPUTS)
     if not matches:
         return []
     entry = matches[0]
@@ -322,7 +331,7 @@ def fetch_alteration_local(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     except Exception:
         return []
     texts: List[str] = []
-    for entry in find_alteration_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat)):
+    for entry in find_alteration_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_ANALYSER_OUTPUTS):
         lines = [f"【本地蚀变分析 - AOI: {entry.get('aoi_name')}，成矿类型: {entry.get('deposit_type','')}】"
                  f"(来源: geo-analyser 标准输出，优先于 Web)"]
         for r in entry.get("results", []):
@@ -354,7 +363,7 @@ def fetch_deep_detection_local(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     except Exception:
         return []
     texts: List[str] = []
-    for entry in find_exploration_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat)):
+    for entry in find_exploration_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_EXPLORATION_OUTPUTS):
         st = entry.get("statistics", {})
         targets = entry.get("prospecting_targets", [])
         lines = [
@@ -393,15 +402,15 @@ def collect_subsystem_figures(category_id: str, min_lon, min_lat, max_lon, max_l
                     figs.append(geo_fig)
         elif category_id == "geophysics":
             from commons.datacolle_broker import find_datacolle_for_bbox
-            m = find_datacolle_for_bbox(bbox)
+            m = find_datacolle_for_bbox(bbox, DATACOLLE_OUTPUTS)
             if m:
                 figs.extend(m[0].get("figures", []))
         elif category_id == "remote_sensing":
             from commons.analyser_broker import find_alteration_for_bbox
             from commons.exploration_broker import find_exploration_for_bbox
-            for e in find_alteration_for_bbox(bbox):
+            for e in find_alteration_for_bbox(bbox, GEO_ANALYSER_OUTPUTS):
                 figs.extend(e.get("figures", []))
-            for e in find_exploration_for_bbox(bbox):
+            for e in find_exploration_for_bbox(bbox, GEO_EXPLORATION_OUTPUTS):
                 figs.extend(e.get("figures", []))
     except Exception as e:
         print(f"[Figures] {category_id} 图件收集失败：{e}")
@@ -420,7 +429,7 @@ SUPPORTED = {"climate", "geography", "geology", "geophysics", "geochemistry",
 # InSAR 形变监测 — 从 geo-insar 标准输出读本地干涉对统计
 # ---------------------------------------------------------------------------
 
-_GEO_INSAR_DOWNLOADS = "/opt/deepexplor-services/geo-insar/downloads"
+_GEO_INSAR_DOWNLOADS = GEO_INSAR_DOWNLOADS
 
 
 def fetch_insar_local(
@@ -643,17 +652,14 @@ def fetch_structural_local(
     密度热点=导/容矿通道、源-运-储框架),给下游 LLM 合成「成矿-构造关系」提供本地实证抓手,
     避免因缺实证而在「不得凭空捏造」约束下略过该论述。
     """
-    import sys
-    _repo = "/opt/deepexplor-services"
-    if _repo not in sys.path:
-        sys.path.insert(0, _repo)
+    _import_commons()
     try:
         from commons.structural_broker import find_structural_for_bbox
     except Exception:
         return []
 
     texts: List[str] = []
-    for entry in find_structural_for_bbox((min_lon, min_lat, max_lon, max_lat)):
+    for entry in find_structural_for_bbox((min_lon, min_lat, max_lon, max_lat), GEO_STRU_OUTPUTS):
         st = entry.get("structural_stats", {})
         n = st.get("n_lineaments")
         text = f"【本地构造解译 - AOI: {entry.get('aoi_name')}】(来源: geo-stru 标准输出)\n"
