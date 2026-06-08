@@ -1278,15 +1278,18 @@ class PptxBuilder:
     def _add_target_slide(self, prs, location, target_figure, mineral_type: str):
         """靶区推荐页：底图框定靶区。"""
         import os
+        mode = getattr(target_figure, "mode", "targets") if target_figure is not None else None
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         self._set_slide_bg(slide)
+        title_txt = "找矿有利地段" if mode == "areas" else "靶区推荐"
         self._add_textbox(slide, Inches(0.8), Inches(0.4), Inches(11.5), Inches(0.7),
-                          "靶区推荐", font_size=28, font_name=self.FONT_TITLE,
+                          title_txt, font_size=28, font_name=self.FONT_TITLE,
                           color=self.COLOR_ACCENT, bold=True)
         self._add_accent_line(slide, Inches(0.8), Inches(1.1), Inches(3))
 
         path = self._fig_attr(target_figure, "path") if target_figure is not None else None
         targets = getattr(target_figure, "targets", None) if target_figure is not None else None
+        areas = getattr(target_figure, "favorable_areas", None) if target_figure is not None else None
         if path and os.path.exists(path):
             try:
                 # 左侧热力靶区图
@@ -1297,8 +1300,18 @@ class PptxBuilder:
             self._add_textbox(slide, Inches(0.6), Inches(6.7), Inches(7), Inches(0.6),
                               cap, font_size=11, color=self.COLOR_LIGHT, alignment=PP_ALIGN.CENTER)
             # 右侧：各靶区置信评级 + 理由
-            if targets:
-                grade_color = {"A": "🟥", "B": "🟧", "C": "🟦", "D": "🟦"}
+            if mode == "areas":
+                if areas:
+                    items = []
+                    for a in areas:
+                        items.append(f"{a.get('name','')}（{a.get('direction','')}）"
+                                     f"：{a.get('basis','')}")
+                    self._add_textbox(slide, Inches(8.0), Inches(1.4), Inches(4.9), Inches(0.7),
+                                      "找矿有利地段（未经深部验证）", font_size=15,
+                                      color=self.COLOR_ACCENT, bold=True)
+                    self._add_bullet_list(slide, Inches(8.0), Inches(2.1), Inches(4.9), Inches(4.7),
+                                          items, font_size=11)
+            elif targets:
                 items = []
                 for t in targets:
                     g = t.get("grade", "")

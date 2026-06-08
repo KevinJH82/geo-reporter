@@ -225,21 +225,16 @@ def run_report_generation(task_id: str):
                 return
 
             # 步骤 3.5：靶区推荐图 + 综合置信评价（后台线程 + 心跳，避免长任务静默断连）
-            yield ev({'step': 'synthesis', 'message': '正在生成靶区推荐图并进行综合置信研判...（含一次 Claude 研判，预计 30-90 秒）'})
-            from reporter.synthesis import build_target_zone_figure, evaluate_confidence
+            yield ev({'step': 'synthesis', 'message': '正在统一研判靶区与综合置信...（同一次 Claude 研判，二者自洽，预计 30-90 秒）'})
+            from reporter.synthesis import evaluate_synthesis
 
             def _do_synthesis():
-                tf = None
-                conf = None
                 try:
-                    tf = build_target_zone_figure(location)  # 已挂载已分级的 .targets
+                    # 统一研判：靶区评级与综合置信共用同一证据上下文、单次产出，保证逻辑闭合
+                    return evaluate_synthesis(location, mineral_type, search_results, str(TEMPLATES_DIR))
                 except Exception as exc:
-                    print(f"[Synthesis] 靶区图生成失败：{exc}")
-                try:
-                    conf = evaluate_confidence(location, mineral_type, search_results, str(TEMPLATES_DIR))
-                except Exception as exc:
-                    print(f"[Synthesis] 置信评价失败：{exc}")
-                return tf, conf
+                    print(f"[Synthesis] 统一研判失败：{exc}")
+                    return None, None
 
             syn_box = {}
             yield from pump_keepalive(_do_synthesis, syn_box)

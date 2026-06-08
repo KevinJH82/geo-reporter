@@ -36,6 +36,7 @@ class SearchResult:
     mineral_type: str = ""  # 目标矿种
     exploration_impact: str = ""  # 本类数据对目标矿种勘探作业的影响
     figures: List["Figure"] = field(default_factory=list)  # 子系统图件（确定性收集，不经 LLM）
+    evidence_level: str = ""  # 证据来源层级（确定性标注：子系统本地实证/直连API/网络检索，可组合）
 
 
 @dataclass
