@@ -514,6 +514,71 @@ def fetch_direct(category_id: str, lat: float, lon: float,
     return []
 
 
+def _strike_group(deg: float) -> str:
+    """把走向角(0–180°,正北为0顺时针)归入四组方位名。"""
+    d = deg % 180.0
+    if d < 22.5 or d >= 157.5:
+        return "近SN(近南北)"
+    if d < 67.5:
+        return "NE(北东)"
+    if d < 112.5:
+        return "近EW(近东西)"
+    return "NW(北西)"
+
+
+def _structural_metallogenic_interp(st: dict) -> str:
+    """
+    基于 geo-stru 已落盘的构造统计,给出**与矿种无关**的通用构造控矿初步研判。
+    只依据真实数值(走向分组/断裂密度/线性体规模)做"源-运-储"框架下的导/容矿
+    通道判读,不引入任何具体矿种假设、不臆造未提取的构造。结论属决策支持,需野外核实。
+    """
+    lines: List[str] = []
+    strikes = st.get("dominant_strikes_deg") or []
+    groups: List[str] = []
+    for d in strikes:
+        try:
+            g = _strike_group(float(d))
+        except (TypeError, ValueError):
+            continue
+        if g not in groups:
+            groups.append(g)
+
+    if groups:
+        if len(groups) >= 2:
+            lines.append(
+                f"- 构造格架:发育 {len(groups)} 组优势方向({'、'.join(groups)}),"
+                f"以首组「{groups[0]}」为区域主干断裂格架,余组为横切/次级构造。"
+                f"不同方向断裂的**交汇结点**(尤其主干×横切近共轭部位)是应力-流体易聚集、"
+                f"成矿最有利的构造部位,应作为找矿优先靶区。"
+            )
+        else:
+            lines.append(
+                f"- 构造格架:优势方向集中于「{groups[0]}」单组,构成区域主干断裂格架;"
+                f"沿该组主断裂的拐折、分支与膨大部位为有利容矿构造部位。"
+            )
+
+    dens = st.get("lineament_density_mean")
+    if isinstance(dens, (int, float)):
+        lines.append(
+            f"- 断裂网络与导/容矿:平均断裂密度 {dens:.4f}。在「源-运-储」成矿模型中,"
+            f"断裂网络承担「运」的角色——既是深部成矿流体的**导矿通道**,其交汇/密集带与"
+            f"次级裂隙又构成**容矿空间**;断裂密度热点带因而是构造控矿先验高权重区。"
+        )
+
+    n = st.get("n_lineaments")
+    tot = st.get("total_lineament_length_km")
+    if isinstance(n, int) and n > 0 and isinstance(tot, (int, float)):
+        lines.append(
+            f"- 控矿研判要点:本区共提取 {n} 条线性体、总长 {tot:.1f} km;"
+            f"建议将「近断裂带 + 蚀变/化探异常套合」「断裂交汇结点」「密度热点」三类位置"
+            f"叠合圈定靶区(可进一步叠加 geo-analyser 蚀变、geo-exploration 深部探测收敛)。"
+        )
+
+    if not lines:
+        return ""
+    return "构造控矿初步研判(通用框架,与具体矿种无关):\n" + "\n".join(lines) + "\n"
+
+
 def fetch_structural_local(
     min_lon: float, min_lat: float,
     max_lon: float, max_lat: float,
@@ -522,6 +587,10 @@ def fetch_structural_local(
     扫描 geo-stru 标准构造解译输出,把与本研究区相交的构造统计转成中文文本,
     注入"地质与矿产"章节,作为本 AOI 影像实测的硬本地实证(优先于 Web 搜索)。
     复用 commons/structural_broker(bbox 相交发现 + metadata.json 读取)。
+
+    除几何/统计事实外,还附带一段**通用构造控矿初步研判**(走向分组、共轭交汇靶区、
+    密度热点=导/容矿通道、源-运-储框架),给下游 LLM 合成「成矿-构造关系」提供本地实证抓手,
+    避免因缺实证而在「不得凭空捏造」约束下略过该论述。
     """
     import sys
     _repo = "/opt/deepexplor-services"
@@ -549,7 +618,10 @@ def fetch_structural_local(
         if st.get("elevation_range_m"):
             er = st["elevation_range_m"]
             text += f"- 高程范围: {er[0]:.0f}–{er[1]:.0f} m\n"
+        interp = _structural_metallogenic_interp(st)
+        if interp:
+            text += interp
         text += "- 数据契约: commons/structural_schema.json v1\n"
-        text += "- 说明: 构造解译为遥感地形自动提取的决策支持产物,断裂位置/方向需野外核实。\n"
+        text += "- 说明: 构造解译为遥感地形自动提取的决策支持产物,断裂位置/方向及控矿研判需野外核实。\n"
         texts.append(text)
     return texts
