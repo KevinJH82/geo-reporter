@@ -258,6 +258,94 @@ class ReportBuilder:
             self._add_heading(doc, "下一步工作建议", level=3)
             self._add_paragraph(doc, rec, font_size=11)
 
+    def _add_front_matter(self, doc: Document, location: LocationContext,
+                          search_results: Dict[str, SearchResult], mineral_type: str,
+                          target_figure=None, confidence: dict = None):
+        """前言（工作目标/数据构成/技术路线）+ 执行摘要（结论先行），实现报告首尾呼应。"""
+        # ---- 前言 ----
+        self._add_heading(doc, "前言", level=1)
+
+        goal = (f"本报告针对研究区「{location.area_name}」开展面向"
+                f"「{mineral_type}」的找矿前景综合评价；" if mineral_type
+                else f"本报告针对研究区「{location.area_name}」开展区域地学综合评价；")
+        goal += "通过多源资料的采集、结构化提取与综合研判，回答该区是否具备找矿/勘探价值、" \
+                "有利方向何在、下一步如何部署等问题。"
+        self._add_heading(doc, "一、工作目标", level=2)
+        self._add_paragraph(doc, goal)
+
+        # 数据构成：按来源层级统计章节数
+        n_sub = n_api = n_web = 0
+        for r in (search_results or {}).values():
+            lv = getattr(r, "evidence_level", "") or ""
+            if "子系统本地实证" in lv:
+                n_sub += 1
+            if "直连API" in lv:
+                n_api += 1
+            if "网络检索" in lv:
+                n_web += 1
+        self._add_heading(doc, "二、数据构成", level=2)
+        self._add_paragraph(
+            doc,
+            f"本报告证据来自三个层级：子系统本地实证（{n_sub} 章涉及）、权威直连 API"
+            f"（{n_api} 章涉及）、网络公开检索（{n_web} 章涉及）。各章末标注其来源层级，"
+            "其中子系统本地实证可信度最高，仅网络检索者需补充查证。")
+
+        self._add_heading(doc, "三、技术路线", level=2)
+        self._add_paragraph(
+            doc,
+            "数据采集（直连 API + 缓存 + 网络检索 + 子系统实证）→ 结构化提取（各章定量证据）"
+            "→ 综合研判（同一证据上下文统一产出靶区/有利地段评级与综合置信等级，二者自洽）"
+            "→ 结论与下一步建议。")
+
+        # ---- 执行摘要（结论先行）----
+        doc.add_paragraph()
+        self._add_heading(doc, "执行摘要（结论先行）", level=1)
+        if confidence:
+            grade = str(confidence.get("grade", "")).strip().upper()[:1]
+            label = confidence.get("grade_label", "")
+            gp = doc.add_paragraph()
+            gp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = gp.add_run(f"综合置信等级：{grade or '—'}" + (f"（{label}）" if label else ""))
+            run.font.name = self.FONT_HEITI
+            run.font.size = Pt(18)
+            run.font.bold = True
+            run.font.color.rgb = self._GRADE_COLORS.get(grade, self.COLOR_BLACK)
+            rPr = run._element.get_or_add_rPr()
+            rFonts = rPr.find(qn('w:rFonts'))
+            if rFonts is None:
+                rFonts = OxmlElement('w:rFonts'); rPr.append(rFonts)
+            rFonts.set(qn('w:eastAsia'), self.FONT_HEITI)
+
+            summary = confidence.get("summary", "")
+            if summary:
+                self._add_paragraph(doc, summary, font_size=11)
+            rec = confidence.get("recommendation", "")
+            if rec:
+                self._add_paragraph(doc, f"下一步建议：{rec}", font_size=11, bold=True)
+        else:
+            self._add_paragraph(doc, "（综合置信评价见报告末章。）", font_size=11)
+
+        # 最有利方向（靶区/有利地段）
+        if target_figure is not None:
+            mode = getattr(target_figure, "mode", "targets")
+            if mode == "areas":
+                areas = getattr(target_figure, "favorable_areas", None) or []
+                if areas:
+                    top = areas[0]
+                    self._add_paragraph(
+                        doc, f"最有利方向：{top.get('name','')}（{top.get('direction','')}），"
+                             f"详见「找矿有利地段」章。", font_size=11)
+            else:
+                targets = getattr(target_figure, "targets", None) or []
+                if targets:
+                    t = targets[0]
+                    self._add_paragraph(
+                        doc, f"首选靶区：#{t.get('rank','')}（{t.get('grade','')} 级，中心 "
+                             f"{t.get('longitude',0):.4f}, {t.get('latitude',0):.4f}），"
+                             f"详见「靶区推荐」章。", font_size=11)
+
+        doc.add_page_break()
+
     def _add_key_findings(self, doc: Document, findings: List[str]):
         """添加关键发现列表（过滤无数据占位项）"""
         findings = [f for f in (findings or []) if f and not _is_no_data(f)]
@@ -336,6 +424,10 @@ class ReportBuilder:
         # 分页
         doc.add_page_break()
 
+        # === 前言 + 执行摘要（结论先行，首尾呼应）===
+        self._add_front_matter(doc, location, search_results, mineral_type,
+                               target_figure=target_figure, confidence=confidence)
+
         # === 第一章：研究区基本信息 ===
         self._add_heading(doc, "第一章  研究区基本信息", level=1)
 
@@ -401,27 +493,57 @@ class ReportBuilder:
                     for fig in _figs:
                         self._add_figure(doc, fig)
 
+                # 证据来源层级标注（供可信度核验；不展示具体网址/出处）
+                level = getattr(result, "evidence_level", "")
+                if level:
+                    lp = self._add_paragraph(doc, f"数据来源层级：{level}", font_size=9)
+                    for run in lp.runs:
+                        run.font.italic = True
+                        run.font.color.rgb = self.COLOR_GRAY
+
             # 每个章节后分页
             doc.add_page_break()
 
         # === 靶区推荐章 ===
         next_chapter = 2 + len(get_all_categories())
-        self._add_heading(doc, f"第{self._num_to_chinese(next_chapter)}章  靶区推荐", level=1)
+        mode = getattr(target_figure, "mode", "targets") if target_figure is not None else None
+        if mode == "areas":
+            self._add_heading(doc, f"第{self._num_to_chinese(next_chapter)}章  找矿有利地段", level=1)
+        else:
+            self._add_heading(doc, f"第{self._num_to_chinese(next_chapter)}章  靶区推荐", level=1)
         if target_figure is not None:
-            self._add_paragraph(
-                doc,
-                "综合各方面资料（地质、地球物理、地球化学、遥感蚀变及深部探测），在下图中以"
-                "高热力弧形圈定推荐找矿靶区，并对各靶区给出 A-B-C-D 置信评级（A 最高）。",
-                font_size=11)
-            self._add_figure(doc, target_figure, width_cm=15.0)
-            targets = getattr(target_figure, "targets", None)
-            if targets:
-                rows = []
-                for t in targets:
-                    coord = f"{t.get('longitude', 0):.4f}, {t.get('latitude', 0):.4f}"
-                    rows.append([f"#{t.get('rank', '')}", t.get("grade", ""), coord, t.get("reason", "")])
-                self._add_table(doc, ["靶区", "置信等级", "中心坐标(°E, °N)", "评分理由"], rows,
-                                col_widths=[1.6, 2.0, 4.0, 8.0])
+            if mode == "areas":
+                self._add_paragraph(
+                    doc,
+                    "本研究区暂无深部探测靶区数据，下述结论为综合多源证据（地质、地球物理、"
+                    "地球化学、遥感蚀变等）的定性研判，圈定若干找矿有利地段/远景区。"
+                    "上述地段未经深部探测验证，具体靶区坐标待野外查证后厘定。",
+                    font_size=11)
+                self._add_figure(doc, target_figure, width_cm=15.0)
+                areas = getattr(target_figure, "favorable_areas", None) or []
+                if areas:
+                    rows = []
+                    for a in areas:
+                        rows.append([
+                            a.get("name", ""), a.get("direction", ""),
+                            a.get("basis", ""), a.get("method", "")])
+                    self._add_table(doc, ["有利地段", "方位/特征", "判断依据", "建议查证手段"], rows,
+                                    col_widths=[2.6, 3.0, 5.4, 3.0])
+            else:
+                self._add_paragraph(
+                    doc,
+                    "综合各方面资料（地质、地球物理、地球化学、遥感蚀变及深部探测），在下图中以"
+                    "高热力弧形圈定推荐找矿靶区，并对各靶区给出 A-B-C-D 置信评级（A 最高）。",
+                    font_size=11)
+                self._add_figure(doc, target_figure, width_cm=15.0)
+                targets = getattr(target_figure, "targets", None)
+                if targets:
+                    rows = []
+                    for t in targets:
+                        coord = f"{t.get('longitude', 0):.4f}, {t.get('latitude', 0):.4f}"
+                        rows.append([f"#{t.get('rank', '')}", t.get("grade", ""), coord, t.get("reason", "")])
+                    self._add_table(doc, ["靶区", "置信等级", "中心坐标(°E, °N)", "评分理由"], rows,
+                                    col_widths=[1.6, 2.0, 4.0, 8.0])
         doc.add_page_break()
 
         # === 综合置信评价章（A-B-C-D）===

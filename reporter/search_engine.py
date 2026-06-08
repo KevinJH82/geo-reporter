@@ -21,6 +21,17 @@ class SearchEngineError(Exception):
     pass
 
 
+# 子系统本地实证在原始文本中的特征标记（data_sources 注入）
+_SUBSYSTEM_MARKERS = ("子系统标准输出", "本地实证", "优先于 Web", "优先于Web")
+
+
+def _level_label(levels: set) -> str:
+    """把证据来源层级集合规整为展示字符串，按可信度优先级排序。"""
+    order = ["子系统本地实证", "直连API", "网络检索"]
+    picked = [x for x in order if x in levels]
+    return "+".join(picked)
+
+
 def _parse_llm_json(output: str) -> Optional[dict]:
     """
     从 claude 输出中稳健提取 JSON 对象，解决 LLM 偶发的格式问题：
@@ -110,15 +121,17 @@ class SearchEngine:
     # 阶段 1：Tavily 并发搜索
     # ------------------------------------------------------------------
 
-    def _fetch_one_category(self, category: SearchCategory, location: LocationContext, mineral_type: str = "") -> List[str]:
+    def _fetch_one_category(self, category: SearchCategory, location: LocationContext, mineral_type: str = ""):
         """
         三层采集：
         1. 直连权威 API（climate/geography/geology/hydrology）
         2. SQLite 缓存（命中则跳过 Tavily）
         3. Tavily 搜索（2条定向查询）
-        所有层的结果合并返回。
+        返回 (texts, levels)：texts 为合并后的原始文本；levels 为证据来源层级集合
+        （"子系统本地实证"/"直连API"/"网络检索"），供报告标注与可信度研判使用。
         """
         texts: List[str] = []
+        levels: set = set()
 
         # 层1：直连权威 API（P2）
         if category.id in DIRECT_SUPPORTED:
@@ -131,6 +144,10 @@ class SearchEngine:
             if direct:
                 print(f"[DirectAPI] {category.id} 获取 {len(direct)} 条直连数据")
                 texts.extend(direct)
+                # 区分"子系统本地实证"与普通直连 API
+                if any(any(m in t for m in _SUBSYSTEM_MARKERS) for t in direct):
+                    levels.add("子系统本地实证")
+                levels.add("直连API")
 
         # 层2：缓存（P1）
         cached = self.cache.get(
@@ -141,7 +158,9 @@ class SearchEngine:
         if cached is not None:
             print(f"[Cache] {category.id} 命中缓存（{len(cached)} 条）")
             texts.extend(cached)
-            return texts  # 有缓存则跳过 Tavily
+            if cached:
+                levels.add("网络检索")  # 缓存内容来源于历史 Tavily 检索
+            return texts, levels  # 有缓存则跳过 Tavily
 
         # 层3：Tavily 搜索
         try:
@@ -186,14 +205,18 @@ class SearchEngine:
                 location.centroid_lat, location.centroid_lon,
                 category.id, tavily_texts
             )
+            levels.add("网络检索")
         texts.extend(tavily_texts)
-        return texts
+        return texts, levels
 
     def fetch_all_raw_data(self, location: LocationContext,
                            categories: Optional[List[str]] = None,
-                           mineral_type: str = "") -> Dict[str, List[str]]:
+                           mineral_type: str = ""):
         """
-        阶段 1：并发搜索所有类别，返回 {cat_id: [原始文本, ...]}。
+        阶段 1：并发搜索所有类别。
+        返回 (raw_data, raw_levels)：
+          raw_data   = {cat_id: [原始文本, ...]}
+          raw_levels = {cat_id: "证据来源层级展示字符串"}
         使用 ThreadPoolExecutor 并发，Tavily 有独立限流，不影响 Claude。
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -203,6 +226,7 @@ class SearchEngine:
             all_cats = [c for c in all_cats if c.id in categories]
 
         raw_data: Dict[str, List[str]] = {}
+        raw_levels: Dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=4) as executor:
             future_to_cat = {
                 executor.submit(self._fetch_one_category, cat, location, mineral_type): cat
@@ -211,13 +235,16 @@ class SearchEngine:
             for future in as_completed(future_to_cat):
                 cat = future_to_cat[future]
                 try:
-                    raw_data[cat.id] = future.result()
-                    print(f"[Tavily] 完成：{cat.id}（{len(raw_data[cat.id])} 条结果）")
+                    texts, levels = future.result()
+                    raw_data[cat.id] = texts
+                    raw_levels[cat.id] = _level_label(levels)
+                    print(f"[Tavily] 完成：{cat.id}（{len(texts)} 条结果）")
                 except Exception as e:
                     print(f"[Tavily] 失败：{cat.id} — {e}")
                     raw_data[cat.id] = []
+                    raw_levels[cat.id] = ""
 
-        return raw_data
+        return raw_data, raw_levels
 
     # ------------------------------------------------------------------
     # 阶段 2：Claude API 批量提取
@@ -264,11 +291,13 @@ class SearchEngine:
         )
 
     def extract_all_categories(self, raw_data: Dict[str, List[str]],
-                                location: LocationContext) -> Dict[str, SearchResult]:
+                                location: LocationContext,
+                                raw_levels: Optional[Dict[str, str]] = None) -> Dict[str, SearchResult]:
         """
         阶段 2：分两批调用 claude subprocess（各4个类别），合并结果。
         拆批可避免单次输出过长导致 JSON 截断。
         """
+        raw_levels = raw_levels or {}
         all_cats = get_all_categories()
         category_names = {c.id: c.name for c in all_cats}
 
@@ -311,7 +340,8 @@ class SearchEngine:
                 ],
                 key_findings=cat_data.get("key_findings", []),
                 data_sources=cat_data.get("data_sources", []),
-                error=None
+                error=None,
+                evidence_level=raw_levels.get(cat.id, "")
             )
 
         return results
@@ -326,8 +356,8 @@ class SearchEngine:
         完整两阶段流水线：Tavily 搜索 → Claude API 提取。
         签名与旧版 SearchEngine.search_all_categories 兼容。
         """
-        raw_data = self.fetch_all_raw_data(location, categories)
-        return self.extract_all_categories(raw_data, location)
+        raw_data, raw_levels = self.fetch_all_raw_data(location, categories)
+        return self.extract_all_categories(raw_data, location, raw_levels)
 
     def search_all_categories_stream(self, location: LocationContext,
                                       categories: Optional[List[str]] = None,
@@ -363,7 +393,7 @@ class SearchEngine:
         if "err" in error_box:
             raise error_box["err"]
 
-        raw_data = result_box["data"]
+        raw_data, raw_levels = result_box["data"]
 
         # 阶段2：逐类别提取，每完成一个立即 yield
         all_cats = get_all_categories()
@@ -430,6 +460,7 @@ class SearchEngine:
                     error=None,
                     mineral_type=mineral_type,
                     exploration_impact=cat_data.get("exploration_impact", ""),
-                    figures=figs
+                    figures=figs,
+                    evidence_level=raw_levels.get(cat_id, "")
                 )
             yield idx, total, cat_id, result
