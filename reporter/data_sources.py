@@ -301,6 +301,227 @@ def _geo_stru_figures(bbox) -> List[dict]:
     return figs
 
 
+GEO_MODEL3D_OUTPUTS = _ROOT + "/geo-model3d/results"
+
+# geo-model3d 三维立体成矿预测图：(metadata.products 键, 图注)
+_GEO_MODEL3D_FIGS = [
+    ("depth_profile_png", "三维成矿有利度/不确定性—深度剖面"),
+]
+
+
+def _geo_model3d_figures(bbox) -> List[dict]:
+    """取 geo-model3d 对本研究区的三维立体成矿预测图件（深度切片/剖面）；无则返回空。"""
+    _import_commons()
+    try:
+        from commons.model3d_broker import find_model3d_for_bbox, get_product_path
+    except Exception as e:
+        print(f"[Figures] geo-model3d import 失败：{e}")
+        return []
+    try:
+        matches = find_model3d_for_bbox(bbox, GEO_MODEL3D_OUTPUTS)
+    except Exception as e:
+        print(f"[Figures] geo-model3d 查询失败：{e}")
+        return []
+    if not matches:
+        return []
+    entry = matches[0]
+    aoi = entry.get("aoi_name", "")
+    ms = entry.get("model_stats", {})
+    fam = ms.get("family", "")
+    band = ms.get("depth_km_band", "")
+    figs: List[dict] = []
+    for key, caption in _GEO_MODEL3D_FIGS:
+        p = get_product_path(entry, key)
+        if p:
+            figs.append({"path": p,
+                         "caption": f"{caption}（{aoi}，成因族 {fam}，成矿深度带 {band}km，geo-model3d 立体预测）",
+                         "source": "geo-model3d"})
+    # 深度切片 PNG（slice_pngs 是相对路径列表）
+    for rel in (entry.get("products", {}) or {}).get("slice_pngs", []) or []:
+        import os as _os
+        p = _os.path.join(entry["model3d_dir"], rel)
+        if _os.path.exists(p):
+            figs.append({"path": p, "caption": f"三维成矿有利度深度切片（{aoi}，geo-model3d）",
+                         "source": "geo-model3d"})
+    return figs
+
+
+_PRED_METHOD_CN = {"knowledge": "知识加权融合（无标签）", "woe": "证据权法 WofE（数据驱动）",
+                   "rf": "随机森林（数据驱动）", "pu": "PU-learning 正样本-未标注半监督（数据驱动）",
+                   "domain_adapt": "领域自适应跨区迁移"}
+
+
+def geo_model3d_modeling_summary(bbox) -> List[str]:
+    """成矿预测建模小节（方向四）：从 geo-model3d metadata 提炼预测方法/标签/特征重要性/验证。
+
+    返回 markdown 文本块列表（可直接拼入报告）；无成果或无建模信息→空。
+    """
+    _import_commons()
+    try:
+        from commons.model3d_broker import find_model3d_for_bbox
+        matches = find_model3d_for_bbox(bbox, GEO_MODEL3D_OUTPUTS)
+    except Exception as e:
+        print(f"[Modeling] geo-model3d 读取失败：{e}")
+        return []
+    if not matches:
+        return []
+    ms = matches[0].get("model_stats", {}) or {}
+    aoi = matches[0].get("aoi_name", "")
+    method = ms.get("prediction_method", "knowledge")
+    ls = ms.get("label_status", {}) or {}
+    fi = ms.get("feature_importance") or {}
+    val = ms.get("validation", {}) or {}
+    tr = ms.get("transfer") or {}
+
+    lines = [f"### 成矿预测建模方法（AOI: {aoi}，geo-model3d）",
+             f"- **预测方法**：{_PRED_METHOD_CN.get(method, method)}",
+             f"- **已知矿点标签**：正样本 {ls.get('n_positive', 0)} 个"
+             f"（落入网格 {ls.get('n_in_grid', 0)}，真负样本/钻孔 {ls.get('n_barren', 0)}），"
+             f"{'达到' if ls.get('sufficient') else '未达'}建模阈值({ls.get('label_min', '?')})"]
+
+    # 特征重要性（RF/PU）或证据权（WofE）
+    if fi.get("method") in ("random_forest", "pu_bagging") and fi.get("importances"):
+        imp = "；".join(f"{k} {v}" for k, v in list(fi["importances"].items())[:6])
+        extra = (f"，OOB={fi.get('oob_score')}" if fi.get("oob_score") is not None else
+                 f"，平均不确定性={fi.get('mean_uncertainty')}" if fi.get("mean_uncertainty") is not None else "")
+        lines.append(f"- **可解释控矿因素（特征重要性）**：{imp}{extra}")
+    elif fi.get("method") == "woe" and fi.get("weights"):
+        ws = "；".join(f"{k} 对比度{v.get('contrast')}" for k, v in list(fi["weights"].items())[:6])
+        lines.append(f"- **证据权对比度（WofE）**：{ws}")
+
+    # 验证
+    loo = val.get("loo_hit_rate", {}) or {}
+    if loo.get("status") == "ok":
+        lines.append(f"- **已知矿点捕获率验证**：前10%面积捕获 {loo.get('capture_top10pct')}、"
+                     f"前20% {loo.get('capture_top20pct')}，提升度 lift₁₀={loo.get('lift_top10')}")
+    kc = val.get("knowledge_consistency", {}) or {}
+    if kc.get("tectonic_setting"):
+        lines.append(f"- **知识校验（构造背景自洽性）**：{kc.get('note', '')}")
+
+    # 跨区迁移
+    if tr:
+        lines.append(f"- **跨区迁移**：源区 {tr.get('source_aoi')}（族 {tr.get('source_family')}），"
+                     f"迁移置信度 {tr.get('transfer_confidence')}，特征漂移 {tr.get('feature_shift')}")
+
+    warns = ms.get("warnings", []) or []
+    if warns:
+        lines.append("- **诚实性提示**：" + "；".join(warns[:3]))
+
+    return ["\n".join(lines)]
+
+
+GEO_GEOPHYS_OUTPUTS = _ROOT + "/geo-geophys/results"
+
+# geo-geophys 位场处理图件：(metadata.products 键, 图注前缀)
+_GEO_GEOPHYS_MAP_KEYS = ["map_magnetic_rtp", "map_analytic_signal", "map_tilt"]
+
+
+def _geo_geophys_figures(bbox) -> List[dict]:
+    """取 geo-geophys 对本研究区的位场处理图件（化极/解析信号/倾斜角 + 磁源深度）；无则返回空。"""
+    _import_commons()
+    try:
+        from commons.geophys_broker import find_geophys_for_bbox, get_product_path
+    except Exception as e:
+        print(f"[Figures] geo-geophys import 失败：{e}")
+        return []
+    try:
+        matches = find_geophys_for_bbox(bbox, GEO_GEOPHYS_OUTPUTS)
+    except Exception as e:
+        print(f"[Figures] geo-geophys 查询失败：{e}")
+        return []
+    if not matches:
+        return []
+    entry = matches[0]
+    aoi = entry.get("aoi_name", "")
+    ms = entry.get("model_stats", {})
+    eu = (ms.get("euler") or {})
+    depth_txt = (f"，磁源深度中位 {eu['depth_median_m']/1000:.1f}km" if eu.get("depth_median_m") else "")
+    figs: List[dict] = []
+    # 图件在 products.figures（相对路径列表）
+    import os as _os
+    for rel in (entry.get("products", {}) or {}).get("figures", []) or []:
+        p = _os.path.join(entry["geophys_dir"], rel)
+        if _os.path.exists(p):
+            figs.append({"path": p,
+                         "caption": f"区域物探解释（{aoi}{depth_txt}，geo-geophys 位场处理，区域尺度）",
+                         "source": "geo-geophys"})
+    return figs
+
+
+GEO_GEOCHEM_OUTPUTS = _ROOT + "/geo-geochem/results"
+
+
+def _geo_geochem_figures(bbox) -> List[dict]:
+    """取 geo-geochem 对本研究区的化探异常图件（元素异常/组合异常/C-A 曲线）；无则返回空。"""
+    _import_commons()
+    try:
+        from commons.geochem_broker import find_geochem_for_bbox
+    except Exception as e:
+        print(f"[Figures] geo-geochem import 失败：{e}")
+        return []
+    try:
+        matches = find_geochem_for_bbox(bbox, GEO_GEOCHEM_OUTPUTS)
+    except Exception as e:
+        print(f"[Figures] geo-geochem 查询失败：{e}")
+        return []
+    if not matches:
+        return []
+    entry = matches[0]
+    aoi = entry.get("aoi_name", "")
+    mineral = (entry.get("model_stats") or {}).get("mineral_type", "")
+    figs: List[dict] = []
+    # 图件在 products.figures（相对 geochem_dir 的路径列表）
+    import os as _os
+    for rel in (entry.get("products", {}) or {}).get("figures", []) or []:
+        p = _os.path.join(entry["geochem_dir"], rel)
+        if _os.path.exists(p):
+            figs.append({"path": p,
+                         "caption": f"地球化学异常（{aoi}，目标矿种 {mineral}，geo-geochem C-A 分形分离/多元素组合）",
+                         "source": "geo-geochem"})
+    return figs
+
+
+def fetch_geochem_summary_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
+    """从 geo-geochem 标准输出读取本研究区化探异常统计与浓集中心，供 LLM 提取（本地实证，优先采信）。"""
+    _import_commons()
+    try:
+        from commons.geochem_broker import find_geochem_for_bbox, load_anomaly_points
+    except Exception:
+        return []
+    try:
+        matches = find_geochem_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_GEOCHEM_OUTPUTS)
+    except Exception:
+        return []
+    if not matches:
+        return []
+    entry = matches[0]
+    ms = entry.get("model_stats") or {}
+    lines = [f"【本地地球化学异常 - geo-geochem 子系统标准输出，AOI: {entry.get('aoi_name')}，"
+             f"目标矿种: {ms.get('mineral_type', '?')}】(优先于 Web 搜索，可直接引用)"]
+    ast = ms.get("anomaly_stats") or {}
+    if ast:
+        els = ast.get("elements_processed") or []
+        comb = ast.get("combination") or {}
+        lines.append(f"- 基于 {ast.get('n_points', '?')} 个化探采样点，提取 {len(els)} 种元素异常"
+                     f"（{'、'.join(els)}），组合方法 {comb.get('method', '-')}。")
+        thr = ast.get("thresholds") or {}
+        for el, v in list(thr.items())[:8]:
+            lines.append(f"  · {el} 异常下限 {v.get('threshold')}（{v.get('method', '-')}）")
+    elif ms.get("prior_only"):
+        po = ms["prior_only"]
+        lines.append(f"- 本区无实测化探点位，仅有区域背景阈值先验（{po.get('n_threshold_elements', 0)} 种元素），未提取异常。")
+    pts = load_anomaly_points(entry)
+    if pts:
+        lines.append(f"- 识别浓集中心 {len(pts)} 个（按强度排序，前若干）：")
+        for a in pts[:8]:
+            lon, lat = a.get("lon"), a.get("lat")
+            loc = f"({lon:.4f}, {lat:.4f})" if isinstance(lon, (int, float)) and isinstance(lat, (int, float)) else "(-,-)"
+            lines.append(f"  · #{a.get('rank')}: 中心 {loc}，面积 {a.get('area_km2', '-')} km²，衬度 {a.get('contrast', '-')}")
+    for w in (ms.get("warnings") or []):
+        lines.append(f"- 注意：{w}")
+    return ["\n".join(lines)]
+
+
 def fetch_datacolle_section(section_id: str, min_lon, min_lat, max_lon, max_lat) -> List[str]:
     """
     从 data-colle 标准输出读取与本研究区相交、最新一次成果的指定章节文本
@@ -405,6 +626,9 @@ def collect_subsystem_figures(category_id: str, min_lon, min_lat, max_lon, max_l
             m = find_datacolle_for_bbox(bbox, DATACOLLE_OUTPUTS)
             if m:
                 figs.extend(m[0].get("figures", []))
+        elif category_id == "geochemistry":
+            # geo-geochem 真实异常图件（元素/组合异常 + C-A 曲线）
+            figs.extend(_geo_geochem_figures(bbox))
         elif category_id == "remote_sensing":
             from commons.analyser_broker import find_alteration_for_bbox
             from commons.exploration_broker import find_exploration_for_bbox
@@ -553,16 +777,18 @@ def fetch_direct(category_id: str, lat: float, lon: float,
                 + fetch_datacolle_section("geography", min_lon, min_lat, max_lon, max_lat)
                 + fetch_structural_local(min_lon, min_lat, max_lon, max_lat))
     elif category_id == "geology":
-        # 地质章节:直连地质数据 + geo-stru 本地构造解译 + data-colle 地质资料(本地实证,优先于 Web)
+        # 地质章节:直连地质数据 + geo-stru 本地构造解译 + data-colle 地质资料 + geo-model3d 成矿建模小节(方向四)
         return (fetch_geology(lat, lon)
                 + fetch_structural_local(min_lon, min_lat, max_lon, max_lat)
-                + fetch_datacolle_section("geology", min_lon, min_lat, max_lon, max_lat))
+                + fetch_datacolle_section("geology", min_lon, min_lat, max_lon, max_lat)
+                + geo_model3d_modeling_summary(_bbox(min_lon, min_lat, max_lon, max_lat)))
     elif category_id == "geophysics":
         # 地球物理章节:从 data-colle 读取本研究区物探资料
         return fetch_datacolle_section("geophysics", min_lon, min_lat, max_lon, max_lat)
     elif category_id == "geochemistry":
-        # 地球化学章节:从 data-colle 读取本研究区化探资料
-        return fetch_datacolle_section("geochemistry", min_lon, min_lat, max_lon, max_lat)
+        # 地球化学章节:data-colle 资料文本 + geo-geochem 本地异常实证（追加，不替换）
+        return (fetch_datacolle_section("geochemistry", min_lon, min_lat, max_lon, max_lat)
+                + fetch_geochem_summary_text(min_lon, min_lat, max_lon, max_lat))
     elif category_id == "hydrology":
         return fetch_hydrology(min_lon, min_lat, max_lon, max_lat)
     elif category_id == "insar_deformation":
