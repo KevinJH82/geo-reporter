@@ -374,7 +374,7 @@ class ReportBuilder:
 
     def build_report(self, location: LocationContext, search_results: Dict[str, SearchResult],
                      output_name: str = None, mineral_type: str = "",
-                     target_figure=None, confidence: dict = None) -> str:
+                     target_figure=None, confidence: dict = None, tenant_id: str = None) -> str:
         """
         生成完整的地质勘探报告。
 
@@ -392,6 +392,10 @@ class ReportBuilder:
         str
             生成的 .docx 文件路径
         """
+        # P2 租户隔离:把本次报告的租户写入线程上下文,下游 broker 发现据此过滤他租户产物
+        from .data_sources import set_tenant
+        set_tenant(tenant_id)
+
         doc = Document()
 
         # 设置页面边距（GB/T 9704）

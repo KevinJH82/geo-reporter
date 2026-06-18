@@ -97,7 +97,7 @@ def _datacolle_figs(c):
     ds._import_commons()
     try:
         from commons.datacolle_broker import find_datacolle_for_bbox
-        m = find_datacolle_for_bbox(c.bbox, ds.DATACOLLE_OUTPUTS)
+        m = find_datacolle_for_bbox(c.bbox, ds.DATACOLLE_OUTPUTS, tenant_id=ds.current_tenant())
         return m[0].get("figures", []) if m else []
     except Exception:
         return []
@@ -108,7 +108,7 @@ def _alteration_figs(c):
     try:
         from commons.analyser_broker import find_alteration_for_bbox
         figs = []
-        for e in find_alteration_for_bbox(c.bbox, ds.GEO_ANALYSER_OUTPUTS):
+        for e in find_alteration_for_bbox(c.bbox, ds.GEO_ANALYSER_OUTPUTS, tenant_id=ds.current_tenant()):
             figs.extend(e.get("figures", []))
         return figs
     except Exception:

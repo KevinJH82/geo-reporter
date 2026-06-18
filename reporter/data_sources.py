@@ -12,7 +12,20 @@ Direct Data Sources — 直连全球权威 API
 import json
 import urllib.request
 import urllib.parse
+from contextvars import ContextVar
 from typing import List, Optional, Tuple
+
+# 当前报告的租户上下文(P2 隔离):build_report 入口 set,broker 发现按此过滤他租户产物。
+# 报告在 worker 线程内同步构建,ContextVar 线程内可见;并发报告各线程独立,天然无串扰。
+_TENANT: ContextVar = ContextVar("reporter_tenant", default=None)
+
+
+def set_tenant(tenant_id):
+    _TENANT.set(tenant_id or None)
+
+
+def current_tenant():
+    return _TENANT.get()
 
 
 def _get(url: str, timeout: int = 15) -> dict:
@@ -283,7 +296,7 @@ def _geo_stru_figures(bbox) -> List[dict]:
         print(f"[Figures] geo-stru import 失败：{e}")
         return []
     try:
-        matches = find_structural_for_bbox(bbox, GEO_STRU_OUTPUTS)
+        matches = find_structural_for_bbox(bbox, GEO_STRU_OUTPUTS, tenant_id=current_tenant())
     except Exception as e:
         print(f"[Figures] geo-stru 查询失败：{e}")
         return []
@@ -318,7 +331,7 @@ def _geo_model3d_figures(bbox) -> List[dict]:
         print(f"[Figures] geo-model3d import 失败：{e}")
         return []
     try:
-        matches = find_model3d_for_bbox(bbox, GEO_MODEL3D_OUTPUTS)
+        matches = find_model3d_for_bbox(bbox, GEO_MODEL3D_OUTPUTS, tenant_id=current_tenant())
     except Exception as e:
         print(f"[Figures] geo-model3d 查询失败：{e}")
         return []
@@ -359,7 +372,7 @@ def geo_model3d_modeling_summary(bbox) -> List[str]:
     _import_commons()
     try:
         from commons.model3d_broker import find_model3d_for_bbox
-        matches = find_model3d_for_bbox(bbox, GEO_MODEL3D_OUTPUTS)
+        matches = find_model3d_for_bbox(bbox, GEO_MODEL3D_OUTPUTS, tenant_id=current_tenant())
     except Exception as e:
         print(f"[Modeling] geo-model3d 读取失败：{e}")
         return []
@@ -425,7 +438,7 @@ def _geo_geophys_figures(bbox) -> List[dict]:
         print(f"[Figures] geo-geophys import 失败：{e}")
         return []
     try:
-        matches = find_geophys_for_bbox(bbox, GEO_GEOPHYS_OUTPUTS)
+        matches = find_geophys_for_bbox(bbox, GEO_GEOPHYS_OUTPUTS, tenant_id=current_tenant())
     except Exception as e:
         print(f"[Figures] geo-geophys 查询失败：{e}")
         return []
@@ -482,7 +495,7 @@ def fetch_slowvars_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
         print(f"[Slowvars] geo-7slow import 失败：{e}")
         return []
     try:
-        matches = find_slowvars_for_bbox((min_lon, min_lat, max_lon, max_lat), GEO_SLOWVARS_OUTPUTS)
+        matches = find_slowvars_for_bbox((min_lon, min_lat, max_lon, max_lat), GEO_SLOWVARS_OUTPUTS, tenant_id=current_tenant())
     except Exception as e:
         print(f"[Slowvars] geo-7slow 查询失败：{e}")
         return []
@@ -584,7 +597,7 @@ def _geo_slowvars_figures(bbox) -> List[dict]:
         print(f"[Figures] geo-7slow import 失败：{e}")
         return []
     try:
-        matches = find_slowvars_for_bbox(tuple(bbox), GEO_SLOWVARS_OUTPUTS)
+        matches = find_slowvars_for_bbox(tuple(bbox), GEO_SLOWVARS_OUTPUTS, tenant_id=current_tenant())
     except Exception as e:
         print(f"[Figures] geo-7slow 查询失败：{e}")
         return []
@@ -611,7 +624,7 @@ def _geo_geochem_figures(bbox) -> List[dict]:
         print(f"[Figures] geo-geochem import 失败：{e}")
         return []
     try:
-        matches = find_geochem_for_bbox(bbox, GEO_GEOCHEM_OUTPUTS)
+        matches = find_geochem_for_bbox(bbox, GEO_GEOCHEM_OUTPUTS, tenant_id=current_tenant())
     except Exception as e:
         print(f"[Figures] geo-geochem 查询失败：{e}")
         return []
@@ -640,7 +653,7 @@ def fetch_geochem_summary_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     except Exception:
         return []
     try:
-        matches = find_geochem_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_GEOCHEM_OUTPUTS)
+        matches = find_geochem_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_GEOCHEM_OUTPUTS, tenant_id=current_tenant())
     except Exception:
         return []
     if not matches:
@@ -690,7 +703,7 @@ def fetch_datacolle_section(section_id: str, min_lon, min_lat, max_lon, max_lat)
         from commons.datacolle_broker import find_datacolle_for_bbox
     except Exception:
         return []
-    matches = find_datacolle_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), DATACOLLE_OUTPUTS)
+    matches = find_datacolle_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), DATACOLLE_OUTPUTS, tenant_id=current_tenant())
     if not matches:
         return []
     entry = matches[0]
@@ -710,7 +723,7 @@ def fetch_alteration_local(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     except Exception:
         return []
     texts: List[str] = []
-    for entry in find_alteration_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_ANALYSER_OUTPUTS):
+    for entry in find_alteration_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_ANALYSER_OUTPUTS, tenant_id=current_tenant()):
         lines = [f"【本地蚀变分析 - AOI: {entry.get('aoi_name')}，成矿类型: {entry.get('deposit_type','')}】"
                  f"(来源: geo-analyser 标准输出，优先于 Web)"]
         for r in entry.get("results", []):
@@ -742,7 +755,7 @@ def fetch_deep_detection_local(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     except Exception:
         return []
     texts: List[str] = []
-    for entry in find_exploration_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_EXPLORATION_OUTPUTS):
+    for entry in find_exploration_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_EXPLORATION_OUTPUTS, tenant_id=current_tenant()):
         st = entry.get("statistics", {})
         targets = entry.get("prospecting_targets", [])
         lines = [
@@ -769,7 +782,7 @@ def fetch_geophys_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     except Exception:
         return []
     try:
-        matches = find_geophys_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_GEOPHYS_OUTPUTS)
+        matches = find_geophys_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_GEOPHYS_OUTPUTS, tenant_id=current_tenant())
     except Exception:
         return []
     if not matches:
@@ -814,7 +827,7 @@ def fetch_known_deposits_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     except Exception:
         return []
     try:
-        matches = find_deposits_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_DEPOSITS_OUTPUTS)
+        matches = find_deposits_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_DEPOSITS_OUTPUTS, tenant_id=current_tenant())
     except Exception:
         return []
     if not matches:
@@ -843,7 +856,7 @@ def fetch_drill_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     except Exception:
         return []
     try:
-        matches = find_drill_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_DRILL_OUTPUTS)
+        matches = find_drill_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_DRILL_OUTPUTS, tenant_id=current_tenant())
     except Exception:
         return []
     if not matches:
@@ -885,7 +898,7 @@ def fetch_geochem_public_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     except Exception:
         return []
     try:
-        matches = find_public_geochem_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_GEOCHEM_PUBLIC_ROOT)
+        matches = find_public_geochem_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_GEOCHEM_PUBLIC_ROOT, tenant_id=current_tenant())
     except Exception:
         return []
     if not matches:
@@ -1065,7 +1078,7 @@ def fetch_insar_local(
     _import_commons()
     try:
         from commons.insar_broker import find_insar_for_bbox
-        broker_matches = find_insar_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), _GEO_INSAR_DOWNLOADS)
+        broker_matches = find_insar_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), _GEO_INSAR_DOWNLOADS, tenant_id=current_tenant())
     except Exception:
         broker_matches = []
 
@@ -1122,7 +1135,7 @@ def _geo_insar_figures(bbox) -> List[dict]:
         print(f"[Figures] geo-insar import 失败：{e}")
         return []
     try:
-        matches = find_insar_for_bbox(bbox, _GEO_INSAR_DOWNLOADS)
+        matches = find_insar_for_bbox(bbox, _GEO_INSAR_DOWNLOADS, tenant_id=current_tenant())
     except Exception as e:
         print(f"[Figures] geo-insar 查询失败：{e}")
         return []
@@ -1272,7 +1285,7 @@ def fetch_structural_local(
         return []
 
     texts: List[str] = []
-    for entry in find_structural_for_bbox((min_lon, min_lat, max_lon, max_lat), GEO_STRU_OUTPUTS):
+    for entry in find_structural_for_bbox((min_lon, min_lat, max_lon, max_lat), GEO_STRU_OUTPUTS, tenant_id=current_tenant()):
         st = entry.get("structural_stats", {})
         n = st.get("n_lineaments")
         text = f"【本地构造解译 - AOI: {entry.get('aoi_name')}】(来源: geo-stru 标准输出)\n"

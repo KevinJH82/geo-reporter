@@ -62,6 +62,15 @@ def _parse_uploaded_file(file_path: str):
 
 # Flask 应用
 app = Flask(__name__, template_folder=str(BASE_DIR / "web" / "templates"))
+# ── 内部鉴权:拒绝绕过 BFF 的直连(PORTAL_INTERNAL_KEY 配置后生效) ──
+try:
+    import sys as _ia_sys
+    if '/opt/deepexplor-services' not in _ia_sys.path:
+        _ia_sys.path.insert(0, '/opt/deepexplor-services')
+    from commons.internal_auth import init_internal_auth as _init_internal_auth
+    _init_internal_auth(app)
+except Exception as _ia_e:
+    print(f'[internal_auth] 跳过接入: {_ia_e}')
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB 限制
 
 # 任务状态跟踪
@@ -151,6 +160,7 @@ def run_report_generation(task_id: str):
         return jsonify({"error": "Task not found"}), 404
 
     mineral_type = request.args.get("mineral", "").strip()
+    tenant_id = request.headers.get("X-Tenant-Id")   # P2 隔离:BFF 经反代/适配器注入
 
     def generate_events():
         def ev(payload):
@@ -250,7 +260,8 @@ def run_report_generation(task_id: str):
                 report_builder = ReportBuilder(str(REPORTS_DIR))
                 return report_builder.build_report(
                     location, search_results, output_name=task["area_name"],
-                    mineral_type=mineral_type, target_figure=target_figure, confidence=confidence)
+                    mineral_type=mineral_type, target_figure=target_figure, confidence=confidence,
+                    tenant_id=tenant_id)
 
             yield from pump_keepalive(_do_build, build_box)
             if "error" in build_box:

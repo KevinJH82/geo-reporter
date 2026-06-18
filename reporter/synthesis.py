@@ -19,7 +19,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from .categories import Figure, get_all_categories
 from .basemap import render_basemap
-from .data_sources import (_import_commons, GEO_STRU_OUTPUTS, DATACOLLE_OUTPUTS,
+from .data_sources import (_import_commons, current_tenant, GEO_STRU_OUTPUTS, DATACOLLE_OUTPUTS,
                            GEO_ANALYSER_OUTPUTS, GEO_EXPLORATION_OUTPUTS,
                            GEO_GEOPHYS_OUTPUTS, GEO_GEOCHEM_OUTPUTS, GEO_MODEL3D_OUTPUTS,
                            GEO_DEPOSITS_OUTPUTS, GEO_DRILL_OUTPUTS)
@@ -40,7 +40,7 @@ def get_prospecting_targets(location) -> List[dict]:
         from commons.exploration_broker import find_exploration_for_bbox
     except Exception:
         return []
-    matches = find_exploration_for_bbox(_bbox(location), GEO_EXPLORATION_OUTPUTS)
+    matches = find_exploration_for_bbox(_bbox(location), GEO_EXPLORATION_OUTPUTS, tenant_id=current_tenant())
     if not matches:
         return []
     return matches[0].get("prospecting_targets", [])
@@ -54,7 +54,7 @@ def get_known_deposits(location) -> List[dict]:
     except Exception:
         return []
     try:
-        matches = find_deposits_for_bbox(_bbox(location), GEO_DEPOSITS_OUTPUTS)
+        matches = find_deposits_for_bbox(_bbox(location), GEO_DEPOSITS_OUTPUTS, tenant_id=current_tenant())
     except Exception:
         return []
     return get_points(matches[0]) if matches else []
@@ -68,7 +68,7 @@ def get_drill_evidence(location) -> dict:
     except Exception:
         return {}
     try:
-        matches = find_drill_for_bbox(_bbox(location), GEO_DRILL_OUTPUTS)
+        matches = find_drill_for_bbox(_bbox(location), GEO_DRILL_OUTPUTS, tenant_id=current_tenant())
     except Exception:
         return {}
     if not matches:
@@ -179,22 +179,22 @@ def _subsystem_availability(location) -> dict:
              "model3d": False, "deposits": False, "drill": False, "n_targets": 0}
     try:
         from commons.structural_broker import find_structural_for_bbox
-        avail["structural"] = bool(find_structural_for_bbox(bbox, GEO_STRU_OUTPUTS))
+        avail["structural"] = bool(find_structural_for_bbox(bbox, GEO_STRU_OUTPUTS, tenant_id=current_tenant()))
     except Exception:
         pass
     try:
         from commons.datacolle_broker import find_datacolle_for_bbox
-        avail["datacolle"] = bool(find_datacolle_for_bbox(bbox, DATACOLLE_OUTPUTS))
+        avail["datacolle"] = bool(find_datacolle_for_bbox(bbox, DATACOLLE_OUTPUTS, tenant_id=current_tenant()))
     except Exception:
         pass
     try:
         from commons.analyser_broker import find_alteration_for_bbox
-        avail["alteration"] = bool(find_alteration_for_bbox(bbox, GEO_ANALYSER_OUTPUTS))
+        avail["alteration"] = bool(find_alteration_for_bbox(bbox, GEO_ANALYSER_OUTPUTS, tenant_id=current_tenant()))
     except Exception:
         pass
     try:
         from commons.exploration_broker import find_exploration_for_bbox
-        m = find_exploration_for_bbox(bbox, GEO_EXPLORATION_OUTPUTS)
+        m = find_exploration_for_bbox(bbox, GEO_EXPLORATION_OUTPUTS, tenant_id=current_tenant())
         avail["exploration"] = bool(m)
         if m:
             avail["n_targets"] = len(m[0].get("prospecting_targets", []))
@@ -202,28 +202,28 @@ def _subsystem_availability(location) -> dict:
         pass
     try:
         from commons.geophys_broker import find_geophys_for_bbox
-        avail["geophys"] = bool(find_geophys_for_bbox(bbox, GEO_GEOPHYS_OUTPUTS))
+        avail["geophys"] = bool(find_geophys_for_bbox(bbox, GEO_GEOPHYS_OUTPUTS, tenant_id=current_tenant()))
     except Exception:
         pass
     try:
         from commons.geochem_broker import find_geochem_for_bbox
-        avail["geochem"] = bool(find_geochem_for_bbox(bbox, GEO_GEOCHEM_OUTPUTS))
+        avail["geochem"] = bool(find_geochem_for_bbox(bbox, GEO_GEOCHEM_OUTPUTS, tenant_id=current_tenant()))
     except Exception:
         pass
     try:
         from commons.model3d_broker import find_model3d_for_bbox
-        avail["model3d"] = bool(find_model3d_for_bbox(bbox, GEO_MODEL3D_OUTPUTS))
+        avail["model3d"] = bool(find_model3d_for_bbox(bbox, GEO_MODEL3D_OUTPUTS, tenant_id=current_tenant()))
     except Exception:
         pass
     try:
         from commons.deposits_broker import find_deposits_for_bbox, get_points
-        m = find_deposits_for_bbox(bbox, GEO_DEPOSITS_OUTPUTS)
+        m = find_deposits_for_bbox(bbox, GEO_DEPOSITS_OUTPUTS, tenant_id=current_tenant())
         avail["deposits"] = bool(m and get_points(m[0]))
     except Exception:
         pass
     try:
         from commons.drill_broker import find_drill_for_bbox, get_holes, get_feedback
-        m = find_drill_for_bbox(bbox, GEO_DRILL_OUTPUTS)
+        m = find_drill_for_bbox(bbox, GEO_DRILL_OUTPUTS, tenant_id=current_tenant())
         avail["drill"] = bool(m and (get_holes(m[0]) or get_feedback(m[0])))
     except Exception:
         pass
