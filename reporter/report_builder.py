@@ -530,11 +530,15 @@ class ReportBuilder:
                     self._add_table(doc, ["有利地段", "方位/特征", "判断依据", "建议查证手段"], rows,
                                     col_widths=[2.6, 3.0, 5.4, 3.0])
             else:
-                self._add_paragraph(
-                    doc,
-                    "综合各方面资料（地质、地球物理、地球化学、遥感蚀变及深部探测），在下图中以"
-                    "高热力弧形圈定推荐找矿靶区，并对各靶区给出 A-B-C-D 置信评级（A 最高）。",
-                    font_size=11)
+                tgt_source = getattr(target_figure, "target_source", "exploration")
+                if tgt_source == "drill":
+                    intro = ("综合各方面资料（地质、地球物理、地球化学、遥感蚀变、深部探测及三维成矿建模），"
+                             "采用 geo-drill 的 AI 钻探布孔作为推荐靶区（孔位即靶区，含真实坐标与目标深度），"
+                             "在下图中以高热力弧形圈定，并对各靶区给出 A-B-C-D 置信评级（A 最高）。")
+                else:
+                    intro = ("综合各方面资料（地质、地球物理、地球化学、遥感蚀变及深部探测），在下图中以"
+                             "高热力弧形圈定推荐找矿靶区，并对各靶区给出 A-B-C-D 置信评级（A 最高）。")
+                self._add_paragraph(doc, intro, font_size=11)
                 self._add_figure(doc, target_figure, width_cm=15.0)
                 targets = getattr(target_figure, "targets", None)
                 if targets:
@@ -544,6 +548,45 @@ class ReportBuilder:
                         rows.append([f"#{t.get('rank', '')}", t.get("grade", ""), coord, t.get("reason", "")])
                     self._add_table(doc, ["靶区", "置信等级", "中心坐标(°E, °N)", "评分理由"], rows,
                                     col_widths=[1.6, 2.0, 4.0, 8.0])
+
+        # 已知矿点分布（deposits 本地实证）+ 钻探布孔/反馈（geo-drill 验证闭环），有数据才出现
+        try:
+            from .synthesis import get_known_deposits, get_drill_evidence
+            deposits = get_known_deposits(location)
+            drill = get_drill_evidence(location)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Report] 靶区验证数据获取失败：{exc}")
+            deposits, drill = [], {}
+        if deposits:
+            self._add_paragraph(
+                doc, "区内及周边已知矿点（真实标签，用于靶区空间套合与成矿模型印证）：", font_size=11)
+            rows = [[d.get("name", "") or "(未命名)", d.get("commodity", ""), d.get("deposit_type", ""),
+                     f"{d.get('lon', 0):.4f}, {d.get('lat', 0):.4f}"] for d in deposits[:15]]
+            self._add_table(doc, ["矿点名称", "矿种", "矿床类型", "坐标(°E, °N)"], rows,
+                            col_widths=[4.2, 2.2, 3.6, 4.0])
+        holes = (drill.get("holes") or []) if drill else []
+        feedback = (drill.get("feedback") or []) if drill else []
+        # 若计划孔已作为主靶区表展示（target_source=drill），此处不再重复列出，仅保留反馈
+        main_is_drill = getattr(target_figure, "target_source", None) == "drill"
+        show_holes = holes and not main_is_drill
+        if show_holes or feedback:
+            self._add_paragraph(
+                doc, "钻探验证与布孔建议（geo-drill 决策支持，需工程实施验证）：", font_size=11)
+            if feedback:
+                ore = sum(1 for f in feedback if f.get("outcome") == "ore")
+                self._add_paragraph(
+                    doc, f"已有钻孔反馈 {len(feedback)} 个：见矿 {ore}，无矿 {len(feedback)-ore}。", font_size=10)
+                rows = [[f.get("hole_id", "") or "-", f.get("outcome", ""), f.get("element", ""),
+                         str(f.get("max_grade", ""))] for f in feedback[:12]]
+                self._add_table(doc, ["孔号", "结果", "元素", "最高品位"], rows,
+                                col_widths=[3.0, 2.4, 2.4, 3.0])
+            if show_holes:
+                rows = [[h.get("hole_id", "") or f"#{h.get('rank', '')}",
+                         f"{h.get('lon', 0):.4f}, {h.get('lat', 0):.4f}",
+                         str(h.get("target_depth_m", "")), str(h.get("priority", h.get("score", "")))]
+                        for h in holes[:12]]
+                self._add_table(doc, ["计划孔", "坐标(°E, °N)", "目标深度(m)", "优先级/评分"], rows,
+                                col_widths=[2.8, 4.0, 2.6, 3.0])
         doc.add_page_break()
 
         # === 综合置信评价章（A-B-C-D）===

@@ -211,6 +211,9 @@ def render_basemap(
                 font = ImageFont.load_default()
             _draw_targets(img, targets, geo_to_px)
             draw = ImageDraw.Draw(img)  # 热力混合后重建 draw
+
+            # 计算各靶区像素坐标
+            placed = []  # [{px,py,label}]
             for t in targets:
                 lon = t.get("longitude"); lat = t.get("latitude")
                 if lon is None or lat is None:
@@ -218,11 +221,46 @@ def render_basemap(
                 px, py = geo_to_px(lon, lat)
                 rank = t.get("rank", "")
                 grade = t.get("grade", "")
-                label = f"#{rank}" + (f"·{grade}" if grade else "")
-                # 文字描边，保证在热力背景上清晰
+                placed.append({"px": px, "py": py,
+                               "label": f"#{rank}" + (f"·{grade}" if grade else "")})
+
+            # 按像素邻近聚类：相距 < CLUSTER_PX 视为同一热斑（深部靶区常密集相邻、亚像素重叠）
+            CLUSTER_PX = 16.0
+            clusters = []  # [[item,...]]
+            for it in placed:
+                for c in clusters:
+                    cx = sum(m["px"] for m in c) / len(c)
+                    cy = sum(m["py"] for m in c) / len(c)
+                    if (it["px"] - cx) ** 2 + (it["py"] - cy) ** 2 <= CLUSTER_PX ** 2:
+                        c.append(it); break
+                else:
+                    clusters.append([it])
+
+            def _label(ax, ay, text):
+                ax = min(max(ax, 2), width_px - 8 * len(text) - 2)
+                ay = min(max(ay, 2), height_px - 20)
                 for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
-                    draw.text((px + 14 + dx, py - 22 + dy), label, fill=(0, 0, 0), font=font)
-                draw.text((px + 14, py - 22), label, fill=(255, 255, 255), font=font)
+                    draw.text((ax + dx, ay + dy), text, fill=(0, 0, 0), font=font)
+                draw.text((ax, ay), text, fill=(255, 255, 255), font=font)
+
+            for c in clusters:
+                if len(c) == 1:
+                    it = c[0]
+                    _label(it["px"] + 14, it["py"] - 22, it["label"])
+                    continue
+                # 多个靶区重叠：以簇心为锚，按角度均匀扇形散开标签，并画引线指向真实点
+                cx = sum(m["px"] for m in c) / len(c)
+                cy = sum(m["py"] for m in c) / len(c)
+                fan_r = 30 + 7 * len(c)
+                n = len(c)
+                for i, it in enumerate(c):
+                    ang = 2 * math.pi * i / n - math.pi / 2  # 从正上方起均匀分布
+                    lx = cx + fan_r * math.cos(ang)
+                    ly = cy + fan_r * math.sin(ang)
+                    draw.line([cx, cy, lx, ly], fill=(255, 255, 255), width=1)
+                    tx = lx + (4 if math.cos(ang) >= 0 else -8 * len(it["label"]) - 4)
+                    ty = ly - 8
+                    _label(tx, ty, it["label"])
 
         # 金色外框
         for offset in range(3):

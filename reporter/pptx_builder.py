@@ -17,7 +17,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.chart.data import ChartData
-from pptx.enum.chart import XL_CHART_TYPE
+from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
 from pptx.util import Pt as Pt2
 from pptx.oxml.ns import qn
 
@@ -450,23 +450,22 @@ class PptxBuilder:
         # ---- 图例 ----
         chart.has_legend = True
         if chart.legend:
-            chart.legend.position = "r"  # 右侧
-            legend = chart.legend.legend_entries
-            for entry in legend:
-                entry.font.size = Pt(9)
-                entry.font.color.rgb = self.COLOR_LIGHT
-                entry.font.name = self.FONT_BODY
+            chart.legend.position = XL_LEGEND_POSITION.RIGHT  # 右侧
+            chart.legend.include_in_layout = False
+            font = chart.legend.font
+            font.size = Pt(9)
+            font.color.rgb = self.COLOR_LIGHT
+            font.name = self.FONT_BODY
 
         # ---- 数据标签 ----
         data_labels = chart.series[0].data_labels
         data_labels.show_percent = True
         data_labels.show_category_name = False
         data_labels.show_legend_key = False
-        if data_labels:
-            for dl in data_labels:
-                dl.font.size = Pt(8)
-                dl.font.color.rgb = self.COLOR_WHITE
-                dl.font.name = self.FONT_BODY
+        # DataLabels 不可迭代；整组字体直接设在 .font 上
+        data_labels.font.size = Pt(8)
+        data_labels.font.color.rgb = self.COLOR_WHITE
+        data_labels.font.name = self.FONT_BODY
 
         # ---- 标题 ----
         if title:

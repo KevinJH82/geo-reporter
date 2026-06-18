@@ -169,6 +169,19 @@ CATEGORIES = [
         ]
     ),
     SearchCategory(
+        id="slow_variables",
+        name="慢变量综合证据",
+        chapter_title="慢变量综合证据（七因子成矿驱动评估）",
+        sub_topics=[
+            "构造应力梯度与断裂活动性（成矿驱动力）分布特征",
+            "氧化还原梯度、流体超压与化学势（流体-化学驱动）特征",
+            "盖层封闭性与温度（驱动/阻力）对成矿系统的约束",
+            "尖点突变判别式（Δ=b²+4/27·a³）双稳成矿有利区识别",
+            "慢变量综合靶区面积、数量及主控驱动因子",
+            "矿床类型权重预设来源（geo-stru 推理/用户选择）与置信度",
+        ]
+    ),
+    SearchCategory(
         id="mining_rights",
         name="矿业权与法律政策资料",
         chapter_title="矿业权与法律政策资料",
@@ -192,10 +205,11 @@ CATEGORY_ORDER = [
     "geochemistry",       # 4. 地球化学
     "remote_sensing",     # 5. 遥感影像分析
     "insar_deformation",  # 6. InSAR 形变监测
-    "hydrology",          # 7. 水系与水文
-    "climate",            # 8. 气候资料
-    "infrastructure",     # 9. 交通与基础设施
-    "mining_rights",      # 10. 矿业权与法律政策
+    "slow_variables",     # 7. 慢变量综合证据（七因子成矿驱动）
+    "hydrology",          # 8. 水系与水文
+    "climate",            # 9. 气候资料
+    "infrastructure",     # 10. 交通与基础设施
+    "mining_rights",      # 11. 矿业权与法律政策
 ]
 CATEGORIES.sort(key=lambda c: CATEGORY_ORDER.index(c.id) if c.id in CATEGORY_ORDER else 999)
 

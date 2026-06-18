@@ -12,7 +12,7 @@ Direct Data Sources — 直连全球权威 API
 import json
 import urllib.request
 import urllib.parse
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 def _get(url: str, timeout: int = 15) -> dict:
@@ -449,6 +449,157 @@ def _geo_geophys_figures(bbox) -> List[dict]:
 
 
 GEO_GEOCHEM_OUTPUTS = _ROOT + "/geo-geochem/results"
+# 已知矿点标签（geo-deposits 写入 geo-model3d/results/<AOI>/deposits）与钻探布孔/反馈
+GEO_DEPOSITS_OUTPUTS = _ROOT + "/geo-model3d/results"
+GEO_DRILL_OUTPUTS = _ROOT + "/geo-drill/results"
+# 公开地球化学数据注册表根（index.json 所在目录）
+GEO_GEOCHEM_PUBLIC_ROOT = _ROOT + "/geo-geochem/data/public_geochem"
+# geo-7slow 七慢变量综合证据（COG 栅格 + 靶区 GeoJSON）
+GEO_SLOWVARS_OUTPUTS = _ROOT + "/geo-7slow/backend/data/results"
+
+# geo-7slow 8 慢变量权重键 → 中文（驱动 b 项 / 阻力 a 项）
+_SLOWVARS_WEIGHT_CN = {
+    "stress": "构造应力(驱动)", "fault": "断裂活动(驱动)", "redox": "氧化还原(驱动)",
+    "fluid": "流体超压(驱动)", "chem": "化学势(驱动)", "temp_drive": "温度(驱动)",
+    "cap_rock": "盖层封闭(阻力)", "temp_resist": "温度(阻力)",
+}
+# 7 个慢变量驱动层产物键 → 中文
+_SLOWVARS_DRIVER_CN = {
+    "stress_gradient": "构造应力梯度", "redox_gradient": "氧化还原梯度",
+    "fluid_overpressure": "流体超压", "fault_activity": "断裂活动性",
+    "cap_rock_pressure": "盖层封闭", "temp_gradient": "温度梯度",
+    "chem_potential": "化学势",
+}
+
+
+def fetch_slowvars_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
+    """从 geo-7slow 标准输出读本研究区慢变量综合证据：矿床类型来源/置信度、权重预设、
+    7 个慢变量驱动、尖点突变判别式 Δ、靶区面积与逐靶主控因子。无产物 → 空（章节静默降级）。"""
+    _import_commons()
+    try:
+        from commons.slowvars_broker import find_slowvars_for_bbox, load_target_zones
+    except Exception as e:
+        print(f"[Slowvars] geo-7slow import 失败：{e}")
+        return []
+    try:
+        matches = find_slowvars_for_bbox((min_lon, min_lat, max_lon, max_lat), GEO_SLOWVARS_OUTPUTS)
+    except Exception as e:
+        print(f"[Slowvars] geo-7slow 查询失败：{e}")
+        return []
+    if not matches:
+        return []
+
+    entry = matches[0]
+    ms = entry.get("model_stats", {}) or {}
+    aoi = entry.get("aoi_name", "")
+    gctx = entry.get("geologic_context") or {}
+
+    lines = [f"【慢变量综合证据 — geo-7slow 子系统本地实证，AOI: {aoi}，run: {entry.get('run_id')}】"]
+
+    # 矿床类型上下文：来源 + 置信度（geo-stru 推理或用户选择）
+    deposit_type = ms.get("deposit_type") or gctx.get("deposit_type")
+    family = ms.get("family") or gctx.get("family")
+    mineral = ms.get("mineral") or gctx.get("mineral_hint")
+    src = gctx.get("source") or gctx.get("geologic_context_source")
+    conf = gctx.get("deposit_type_confidence") or gctx.get("geo_struct_confidence")
+    if deposit_type or family or mineral:
+        seg = "- 成矿类型上下文："
+        if deposit_type:
+            seg += f"矿床类型={deposit_type}"
+        if family:
+            seg += f"（成因族 {family}）"
+        if mineral:
+            seg += f"，矿种={mineral}"
+        if src:
+            seg += f"，来源={src}"
+        if conf is not None:
+            try:
+                seg += f"，置信度={float(conf):.2f}"
+            except Exception:
+                pass
+        lines.append(seg)
+
+    # 权重预设（驱动 b / 阻力 a 分组）
+    weights = ms.get("weights") or {}
+    if weights:
+        def _fmt(d):
+            return "、".join(f"{_SLOWVARS_WEIGHT_CN.get(k, k)} {float(v):.2f}"
+                            for k, v in sorted(d.items(), key=lambda x: -float(x[1])))
+        drive = {k: v for k, v in weights.items() if k not in ("cap_rock", "temp_resist")}
+        resist = {k: v for k, v in weights.items() if k in ("cap_rock", "temp_resist")}
+        if drive:
+            lines.append(f"- 驱动力(b)权重预设：{_fmt(drive)}")
+        if resist:
+            lines.append(f"- 阻力(a)权重预设：{_fmt(resist)}")
+
+    # 7 个慢变量驱动层（产物）
+    products = entry.get("products") or {}
+    present = [_SLOWVARS_DRIVER_CN[k] for k in _SLOWVARS_DRIVER_CN if products.get(k)]
+    if present:
+        lines.append("- 七个慢变量驱动层（COG 栅格）：" + "、".join(present))
+
+    # 尖点突变判别式 Δ
+    delta_th = ms.get("delta_threshold")
+    delta_pc = ms.get("delta_percentile")
+    if delta_th is not None or delta_pc is not None:
+        seg = "- 尖点突变判别式 Δ："
+        if delta_pc is not None:
+            seg += f"自适应分位 P{float(delta_pc):.0f}"
+        if delta_th is not None:
+            seg += f"（阈值 {float(delta_th):.2f}，Δ<阈值=双稳成矿有利区）"
+        lines.append(seg)
+
+    # 靶区面积与数量
+    ta = ms.get("target_area_km2")
+    tc = ms.get("target_count")
+    if ta is not None and tc is not None:
+        lines.append(f"- 圈定靶区：{int(tc)} 个，合计 {float(ta):.2f} km²"
+                     + ("（本区慢变量场偏平缓，未圈出显著靶区）" if not tc else ""))
+
+    # 逐靶主控慢变量（最多列前 5 个）
+    try:
+        zones = load_target_zones(entry) or []
+    except Exception:
+        zones = []
+    for z in zones[:5]:
+        p = z.get("properties") or {}
+        drv = _SLOWVARS_DRIVER_CN.get(p.get("dominant_driver"), p.get("dominant_driver") or "—")
+        seg = f"  · 靶区#{p.get('rank')}：面积 {float(p.get('area_km2', 0) or 0):.2f} km²，主控={drv}"
+        if p.get("mean_delta") is not None:
+            seg += f"，平均 Δ={float(p['mean_delta']):.3f}"
+        lines.append(seg)
+
+    lines.append("- 说明：慢变量综合为多源遥感/地形证据的尖点突变（cusp catastrophe）融合，靶区为"
+                 "本服务内相对有利区，需结合蚀变/化探/已知矿点验证；本服务 TIR 为定标辐亮度，温度项仅相对意义。")
+    return ["\n".join(lines)]
+
+
+def _geo_slowvars_figures(bbox) -> List[dict]:
+    """geo-7slow 慢变量图件：仅嵌入位图（png/jpg）。当前产物为 COG/GeoJSON、暂无报告级位图→空；
+    待 geo-7slow 产出 PNG 预览（delta/target_zones/dominant_driver）即自动生效。"""
+    _import_commons()
+    try:
+        from commons.slowvars_broker import find_slowvars_for_bbox, get_product_path
+    except Exception as e:
+        print(f"[Figures] geo-7slow import 失败：{e}")
+        return []
+    try:
+        matches = find_slowvars_for_bbox(tuple(bbox), GEO_SLOWVARS_OUTPUTS)
+    except Exception as e:
+        print(f"[Figures] geo-7slow 查询失败：{e}")
+        return []
+    if not matches:
+        return []
+    entry = matches[0]
+    aoi = entry.get("aoi_name", "")
+    figs: List[dict] = []
+    for key, cap in [("delta_discriminant_png", "尖点突变判别式 Δ"),
+                     ("target_zones_png", "慢变量靶区圈定"),
+                     ("dominant_driver_png", "主控慢变量分布")]:
+        p = get_product_path(entry, key)
+        if p and p.lower().endswith((".png", ".jpg", ".jpeg")):
+            figs.append({"path": p, "caption": f"{cap}（{aoi}，geo-7slow）", "source": "geo-7slow"})
+    return figs
 
 
 def _geo_geochem_figures(bbox) -> List[dict]:
@@ -510,6 +661,13 @@ def fetch_geochem_summary_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     elif ms.get("prior_only"):
         po = ms["prior_only"]
         lines.append(f"- 本区无实测化探点位，仅有区域背景阈值先验（{po.get('n_threshold_elements', 0)} 种元素），未提取异常。")
+        # 元素异常分级阈值表（background/weak/moderate/strong），供报告引用具体下限
+        thr = po.get("thresholds") or {}
+        if thr:
+            lines.append("- 区域背景与异常分级阈值（背景/弱/中/强异常）：")
+            for el, v in list(thr.items())[:10]:
+                lines.append(f"  · {el}：背景 {v.get('background', '-')}，弱 {v.get('weak_anomaly', '-')}，"
+                             f"中 {v.get('moderate_anomaly', '-')}，强 {v.get('strong_anomaly', '-')}")
     pts = load_anomaly_points(entry)
     if pts:
         lines.append(f"- 识别浓集中心 {len(pts)} 个（按强度排序，前若干）：")
@@ -603,42 +761,170 @@ def fetch_deep_detection_local(min_lon, min_lat, max_lon, max_lat) -> List[str]:
     return texts
 
 
+def fetch_geophys_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
+    """从 geo-geophys 标准输出读取本研究区位场处理解释与欧拉磁源深度（本地实证，优先采信）。"""
+    _import_commons()
+    try:
+        from commons.geophys_broker import find_geophys_for_bbox, load_euler_sources
+    except Exception:
+        return []
+    try:
+        matches = find_geophys_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_GEOPHYS_OUTPUTS)
+    except Exception:
+        return []
+    if not matches:
+        return []
+    entry = matches[0]
+    ms = entry.get("model_stats") or {}
+    eu = ms.get("euler") or {}
+    lines = [f"【本地地球物理 - geo-geophys 子系统标准输出，AOI: {entry.get('aoi_name')}，"
+             f"目标矿种: {ms.get('mineral_type', '?')}】(优先于 Web 搜索，可直接引用)"]
+    # plain_summary 已是面向报告的中文解释，直接引用
+    for s in (ms.get("plain_summary") or [])[:6]:
+        lines.append(f"- {s}")
+    if eu:
+        dm = eu.get("depth_median_m")
+        dtxt = f"，深度中位 {dm/1000:.1f} km" if isinstance(dm, (int, float)) else ""
+        lines.append(f"- 欧拉反演磁源：{eu.get('n_points', '?')} 个（结构指数 SI={eu.get('si', '-')}，"
+                     f"窗口 {eu.get('window', '-')}{dtxt}）。")
+    # 欧拉磁源点位（前若干，按埋深排序）
+    try:
+        pts = load_euler_sources(entry)
+    except Exception:
+        pts = []
+    if pts:
+        pts_sorted = sorted([p for p in pts if isinstance(p.get("depth_m"), (int, float))],
+                            key=lambda p: p["depth_m"])
+        if pts_sorted:
+            lines.append(f"- 代表性磁源点位（共 {len(pts)} 个，列举浅部前若干）：")
+            for p in pts_sorted[:6]:
+                lon, lat = p.get("lon"), p.get("lat")
+                loc = f"({lon:.4f}, {lat:.4f})" if isinstance(lon, (int, float)) and isinstance(lat, (int, float)) else "(-,-)"
+                lines.append(f"  · {loc}，埋深 {p['depth_m']/1000:.2f} km，置信度 {p.get('confidence', '-')}")
+    for w in (ms.get("warnings") or [])[:3]:
+        lines.append(f"- 注意：{w}")
+    return ["\n".join(lines)]
+
+
+def fetch_known_deposits_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
+    """从 deposits（geo-deposits 写入 geo-model3d/results）读取本研究区已知矿点标签（本地实证）。"""
+    _import_commons()
+    try:
+        from commons.deposits_broker import find_deposits_for_bbox, get_points
+    except Exception:
+        return []
+    try:
+        matches = find_deposits_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_DEPOSITS_OUTPUTS)
+    except Exception:
+        return []
+    if not matches:
+        return []
+    entry = matches[0]
+    pts = get_points(entry)
+    if not pts:
+        return []
+    lines = [f"【本地已知矿点 - geo-deposits 子系统标准输出，AOI: {entry.get('aoi_name')}】"
+             f"(真实矿点标签，优先于 Web 搜索)",
+             f"- 区内及周边已登记已知矿点 {len(pts)} 处（按矿种/类型汇总）："]
+    for p in pts[:12]:
+        lon, lat = p.get("lon"), p.get("lat")
+        loc = f"({lon:.4f}, {lat:.4f})" if isinstance(lon, (int, float)) and isinstance(lat, (int, float)) else "(-,-)"
+        name = p.get("name") or "(未命名)"
+        lines.append(f"  · {name}：矿种 {p.get('commodity', '-')}，类型 {p.get('deposit_type', '-')}，"
+                     f"位置 {loc}，来源 {p.get('source', '-')}")
+    return ["\n".join(lines)]
+
+
+def fetch_drill_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
+    """从 geo-drill 标准输出读取本研究区 AI 布孔与钻探反馈（本地实证）；无产出返回空。"""
+    _import_commons()
+    try:
+        from commons.drill_broker import find_drill_for_bbox, get_holes, get_feedback
+    except Exception:
+        return []
+    try:
+        matches = find_drill_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_DRILL_OUTPUTS)
+    except Exception:
+        return []
+    if not matches:
+        return []
+    entry = matches[0]
+    holes = get_holes(entry)
+    feedback = get_feedback(entry)
+    ms = entry.get("model_stats") or {}
+    if not holes and not feedback:
+        return []
+    lines = [f"【本地钻探验证 - geo-drill 子系统标准输出，AOI: {entry.get('aoi_name')}，"
+             f"目标矿种: {ms.get('mineral_type', '?')}】(决策支持，需工程实施验证)"]
+    for s in (ms.get("plain_summary") or [])[:3]:
+        lines.append(f"- {s}")
+    if holes:
+        lines.append(f"- AI 推荐钻孔 {len(holes)} 个（按优先级，列举前若干）：")
+        for h in holes[:6]:
+            lon, lat = h.get("lon"), h.get("lat")
+            loc = f"({lon:.4f}, {lat:.4f})" if isinstance(lon, (int, float)) and isinstance(lat, (int, float)) else "(-,-)"
+            lines.append(f"  · {h.get('hole_id', '#'+str(h.get('rank', '?')))}：{loc}，"
+                         f"目标深度 {h.get('target_depth_m', '-')} m，评分 {h.get('score', '-')}，"
+                         f"优先级 {h.get('priority', '-')}")
+    if feedback:
+        ore = sum(1 for f in feedback if f.get("outcome") == "ore")
+        lines.append(f"- 钻孔反馈 {len(feedback)} 个：见矿 {ore}，无矿 {len(feedback)-ore}：")
+        for f in feedback[:6]:
+            lon, lat = f.get("lon"), f.get("lat")
+            loc = f"({lon:.4f}, {lat:.4f})" if isinstance(lon, (int, float)) and isinstance(lat, (int, float)) else "(-,-)"
+            lines.append(f"  · {f.get('hole_id', '-')}：{loc}，结果 {f.get('outcome', '-')}，"
+                         f"元素 {f.get('element', '-')}，最高品位 {f.get('max_grade', '-')}（边界 {f.get('cutoff', '-')}）")
+    return ["\n".join(lines)]
+
+
+def fetch_geochem_public_text(min_lon, min_lat, max_lon, max_lat) -> List[str]:
+    """从 geochem_public 注册表读取与本研究区相交的公开化探数据集统计摘要（本地实证，补充）。"""
+    _import_commons()
+    try:
+        from commons.geochem_public_broker import find_public_geochem_for_bbox, load_public_geochem_df
+    except Exception:
+        return []
+    try:
+        matches = find_public_geochem_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), GEO_GEOCHEM_PUBLIC_ROOT)
+    except Exception:
+        return []
+    if not matches:
+        return []
+    texts: List[str] = []
+    for entry in matches[:2]:
+        df, cols = load_public_geochem_df(entry)
+        if df is None or df.empty:
+            continue
+        lines = [f"【公开地球化学数据 - {entry.get('name', '?')}（{entry.get('source', 'public')}）】"
+                 f"(来源: geochem_public 注册表，{len(df)} 个采样点)"]
+        elems = ((cols or {}).get("elements")) or {}
+        for el, colname in list(elems.items())[:8]:
+            if colname in df.columns:
+                try:
+                    s = df[colname].dropna()
+                    if len(s):
+                        lines.append(f"- {el}（{colname}）：均值 {s.mean():.3g}，中位 {s.median():.3g}，"
+                                     f"P95 {s.quantile(0.95):.3g}，max {s.max():.3g}")
+                except Exception:
+                    pass
+        if len(lines) > 1:
+            texts.append("\n".join(lines))
+    return texts
+
+
 def collect_subsystem_figures(category_id: str, min_lon, min_lat, max_lon, max_lat) -> List[dict]:
     """
-    确定性收集某章节对应的子系统图件（不经 LLM，避免幻觉）。
-    返回 [{path, caption, source}, ...]。
+    [向后兼容薄封装] 按声明式消费契约（consumption.CHAPTER_CONTRACT）确定性收集某章节
+    对应的子系统图件（不经 LLM，避免幻觉）。返回 [{path, caption, source}, ...]。
+
+    图件优先级与 fallback（如 geology 优先 geo-stru/geo-model3d、无则回退 Macrostrat；
+    geophysics 优先 geo-geophys、无则回退 data-colle）统一在 consumption 契约表里声明。
     """
-    _import_commons()
-    figs: List[dict] = []
-    bbox = _bbox(min_lon, min_lat, max_lon, max_lat)
-    try:
-        if category_id == "geology":
-            # 优先 geo-stru 本地高清地质构造解译图（针对 ROI、本地实证）
-            figs.extend(_geo_stru_figures(bbox))
-            # 无本地解译图时，回退公开 Macrostrat 地质图（覆盖区，如北美）
-            if not figs:
-                from .geology_map import render_geology_map
-                geo_fig = render_geology_map(min_lon, min_lat, max_lon, max_lat)
-                if geo_fig:
-                    figs.append(geo_fig)
-        elif category_id == "geophysics":
-            from commons.datacolle_broker import find_datacolle_for_bbox
-            m = find_datacolle_for_bbox(bbox, DATACOLLE_OUTPUTS)
-            if m:
-                figs.extend(m[0].get("figures", []))
-        elif category_id == "geochemistry":
-            # geo-geochem 真实异常图件（元素/组合异常 + C-A 曲线）
-            figs.extend(_geo_geochem_figures(bbox))
-        elif category_id == "remote_sensing":
-            from commons.analyser_broker import find_alteration_for_bbox
-            from commons.exploration_broker import find_exploration_for_bbox
-            for e in find_alteration_for_bbox(bbox, GEO_ANALYSER_OUTPUTS):
-                figs.extend(e.get("figures", []))
-            for e in find_exploration_for_bbox(bbox, GEO_EXPLORATION_OUTPUTS):
-                figs.extend(e.get("figures", []))
-    except Exception as e:
-        print(f"[Figures] {category_id} 图件收集失败：{e}")
-    return figs
+    from .consumption import consume_chapter
+    # lat/lon 对图件 provider 不影响，传中心点占位
+    lat = (min_lat + max_lat) / 2.0
+    lon = (min_lon + max_lon) / 2.0
+    return consume_chapter(category_id, lat, lon, min_lon, min_lat, max_lon, max_lat)["figures"]
 
 
 # ---------------------------------------------------------------------------
@@ -646,7 +932,7 @@ def collect_subsystem_figures(category_id: str, min_lon, min_lat, max_lon, max_l
 # ---------------------------------------------------------------------------
 
 SUPPORTED = {"climate", "geography", "geology", "geophysics", "geochemistry",
-             "hydrology", "insar_deformation", "remote_sensing"}
+             "hydrology", "insar_deformation", "remote_sensing", "slow_variables"}
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +940,100 @@ SUPPORTED = {"climate", "geography", "geology", "geophysics", "geochemistry",
 # ---------------------------------------------------------------------------
 
 _GEO_INSAR_DOWNLOADS = GEO_INSAR_DOWNLOADS
+
+
+def _insar_pair_stats_lines(aoi_dir) -> Tuple[List[str], Optional[list]]:
+    """从一个 AOI 目录的 stack_index.json / 逐对 metadata 汇总干涉对堆栈统计。
+
+    返回 (文本行列表, aoi_bbox)；无干涉对→([], None)。
+    """
+    from pathlib import Path
+    aoi_dir = Path(aoi_dir)
+    idx_path = aoi_dir / "stack_index.json"
+    summary = None
+    if idx_path.exists():
+        try:
+            with open(idx_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+        except Exception:
+            summary = None
+    pair_metas: List[dict] = []
+    if summary is not None:
+        pair_metas = summary.get("pairs", []) or []
+    else:
+        for sensor_dir in aoi_dir.iterdir():
+            if not sensor_dir.is_dir():
+                continue
+            for pair_dir in sensor_dir.iterdir():
+                meta_p = pair_dir / "metadata.json"
+                if not meta_p.exists():
+                    continue
+                try:
+                    with open(meta_p, "r", encoding="utf-8") as f:
+                        pair_metas.append(json.load(f))
+                except Exception:
+                    pass
+    if not pair_metas:
+        return [], None
+
+    bbox = next((m.get("aoi_bbox") for m in pair_metas if m.get("aoi_bbox")), None)
+    n = len(pair_metas)
+    dates = sorted({d for m in pair_metas
+                    for d in (m.get("master_date", ""), m.get("slave_date", "")) if d})
+    baselines = [m.get("temporal_baseline_days") for m in pair_metas
+                 if m.get("temporal_baseline_days") is not None]
+    perp = [m.get("perp_baseline_m") for m in pair_metas if m.get("perp_baseline_m") is not None]
+    coh = [m.get("stats", {}).get("coherence_mean") for m in pair_metas]
+    coh = [v for v in coh if v is not None]
+    disp_min = [m.get("stats", {}).get("los_displacement_min_mm") for m in pair_metas]
+    disp_min = [v for v in disp_min if v is not None]
+    disp_max = [m.get("stats", {}).get("los_displacement_max_mm") for m in pair_metas]
+    disp_max = [v for v in disp_max if v is not None]
+    sources = sorted({m.get("source", "") for m in pair_metas if m.get("source")})
+    pols = sorted({m.get("polarization", "") for m in pair_metas if m.get("polarization")})
+    orbits = sorted({m.get("orbit_direction", "") for m in pair_metas if m.get("orbit_direction")})
+
+    lines = [f"- 干涉对数量: {n} 对",
+             f"- 时间跨度: {dates[0] if dates else '?'} 至 {dates[-1] if dates else '?'}"]
+    if baselines:
+        lines.append(f"- 平均时间基线: {sum(baselines)/len(baselines):.1f} 天 "
+                     f"(范围 {min(baselines)}-{max(baselines)} 天)")
+    if perp:
+        lines.append(f"- 垂直基线范围: {min(perp):.0f}–{max(perp):.0f} m")
+    if coh:
+        lines.append(f"- 整体相干性均值: {sum(coh)/len(coh):.3f} "
+                     f"(中位数 {sorted(coh)[len(coh)//2]:.3f})")
+    if disp_min and disp_max:
+        lines.append(f"- 逐对 LOS 形变范围: {min(disp_min):.2f} 至 {max(disp_max):.2f} mm")
+    if sources:
+        lines.append(f"- 数据来源: {', '.join(sources)}")
+    if pols or orbits:
+        lines.append(f"- 极化: {', '.join(pols) or '-'}; 轨道方向: {', '.join(orbits) or '-'}")
+    lines.append("- 数据契约: commons/insar_schema.json")
+    return lines, bbox
+
+
+def _insar_2d_decomp_lines(aoi_dir) -> List[str]:
+    """读取 decomposition_2d.json（升降轨 2D 分解），返回垂直/东西向形变速率文本行；无则空。"""
+    from pathlib import Path
+    p = Path(aoi_dir) / "decomposition_2d.json"
+    if not p.exists():
+        return []
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return []
+    st = d.get("stats") or {}
+    vmean = st.get("vertical_mean_mm_yr")
+    if not isinstance(vmean, (int, float)):
+        return []
+    vmin, vmax = st.get("vertical_min_mm_yr"), st.get("vertical_max_mm_yr")
+    lines = [f"- 升降轨 2D 分解（{d.get('method', 'vertical+EW')}）："]
+    rng = (f"，区间 {vmin:.2f}–{vmax:.2f}"
+           if isinstance(vmin, (int, float)) and isinstance(vmax, (int, float)) else "")
+    lines.append(f"  · 垂直形变速率: 均值 {vmean:.2f}{rng} mm/yr（正=抬升，负=沉降）")
+    return lines
 
 
 def fetch_insar_local(
@@ -667,137 +1047,144 @@ def fetch_insar_local(
 
     匹配规则:对每个 AOI 目录,读 metadata.json 的 aoi_bbox 判断与本研究区是否重叠。
 
+    优先走 commons.insar_broker（AOI 级形变证据契约 stats）；broker 无结果时回退到
+    旧的逐对 metadata 目录遍历，保持兼容。
+
     Returns
     -------
     List[str]: 每个匹配 AOI 一段叙述文本(中文,带具体数值和单位)
     """
-    import os
     from pathlib import Path
 
-    root = Path(_GEO_INSAR_DOWNLOADS)
-    if not root.exists():
-        return []
+    def _intersects(b):
+        if not b or len(b) < 4:
+            return False
+        return not (b[2] < min_lon or b[0] > max_lon or b[3] < min_lat or b[1] > max_lat)
+
+    # 主路径：insar_broker 标准 AOI 级形变证据契约 + 同一 AOI 目录的 2D 分解与逐对堆栈细节（合并）
+    _import_commons()
+    try:
+        from commons.insar_broker import find_insar_for_bbox
+        broker_matches = find_insar_for_bbox(_bbox(min_lon, min_lat, max_lon, max_lat), _GEO_INSAR_DOWNLOADS)
+    except Exception:
+        broker_matches = []
 
     texts: List[str] = []
-    for aoi_dir in root.iterdir():
-        if not aoi_dir.is_dir():
-            continue
+    covered = set()
+    for entry in broker_matches:
+        aoi_dir = entry.get("insar_dir")
+        if aoi_dir:
+            covered.add(str(Path(aoi_dir).resolve()))
+        st = entry.get("stats") or {}
+        lines = [f"【本地 InSAR 形变监测 - AOI: {entry.get('aoi_name')}】"
+                 f"(来源: geo-insar 标准输出契约，本地实证，优先于 Web)"]
+        if isinstance(st.get("deformation_rate_abs_mean_mm_yr"), (int, float)):
+            lines.append(
+                f"- LOS 形变速率(绝对值): 均值 {st['deformation_rate_abs_mean_mm_yr']:.2f} mm/yr，"
+                f"P95 {st.get('deformation_rate_abs_p95_mm_yr', 0):.2f}，"
+                f"峰值 {st.get('deformation_rate_abs_max_mm_yr', 0):.2f} mm/yr")
+            cov = st.get("coverage_ratio")
+            cov_txt = f"{cov*100:.1f}%" if isinstance(cov, (int, float)) else "?"
+            lines.append(
+                f"- 有效覆盖率: {cov_txt}，burst 数: {st.get('n_bursts', '?')}，"
+                f"证据源: {st.get('evidence_source', '-')}")
+        if aoi_dir and Path(aoi_dir).is_dir():
+            lines += _insar_2d_decomp_lines(aoi_dir)           # 升降轨 2D 分解（垂直/EW）
+            pair_lines, _ = _insar_pair_stats_lines(aoi_dir)   # 干涉对数/时间跨度/相干性/基线/极化轨道
+            lines += pair_lines
+        texts.append("\n".join(lines))
 
-        # 优先用 stack_index.json(汇总)
-        idx_path = aoi_dir / "stack_index.json"
-        summary = None
-        if idx_path.exists():
-            try:
-                with open(idx_path, "r", encoding="utf-8") as f:
-                    summary = json.load(f)
-            except Exception:
-                summary = None
-
-        # fallback:遍历 sentinel1_insar/<pair>/metadata.json
-        pair_metas: List[dict] = []
-        if summary is None:
-            for sensor_dir in aoi_dir.iterdir():
-                if not sensor_dir.is_dir():
-                    continue
-                for pair_dir in sensor_dir.iterdir():
-                    meta_p = pair_dir / "metadata.json"
-                    if not meta_p.exists():
-                        continue
-                    try:
-                        with open(meta_p, "r", encoding="utf-8") as f:
-                            pair_metas.append(json.load(f))
-                    except Exception:
-                        pass
-        else:
-            pair_metas = summary.get("pairs", [])
-
-        if not pair_metas:
-            continue
-
-        # 计算覆盖区域并判断是否与本研究区相交
-        bboxes = [m.get("aoi_bbox") for m in pair_metas if m.get("aoi_bbox")]
-        if bboxes:
-            avg_bbox = bboxes[0]  # 同一 AOI 下所有对的 bbox 一致
-            ab_min_lon, ab_min_lat, ab_max_lon, ab_max_lat = avg_bbox
-            # 不相交则跳过
-            if (ab_max_lon < min_lon or ab_min_lon > max_lon or
-                ab_max_lat < min_lat or ab_min_lat > max_lat):
+    # 回退：无 insar_metadata.json 契约、但有逐对堆栈的 AOI 目录（broker 未覆盖）
+    root = Path(_GEO_INSAR_DOWNLOADS)
+    if root.exists():
+        for aoi_dir in root.iterdir():
+            if not aoi_dir.is_dir() or str(aoi_dir.resolve()) in covered:
                 continue
-
-        # 生成统计文本
-        n = len(pair_metas)
-        dates = sorted(set([m.get("master_date", "") for m in pair_metas] +
-                           [m.get("slave_date", "") for m in pair_metas]))
-        dates = [d for d in dates if d]
-        baselines = [m.get("temporal_baseline_days") for m in pair_metas if m.get("temporal_baseline_days") is not None]
-        coh_means = [m.get("stats", {}).get("coherence_mean") for m in pair_metas]
-        coh_means = [v for v in coh_means if v is not None]
-        disp_mins = [m.get("stats", {}).get("los_displacement_min_mm") for m in pair_metas]
-        disp_mins = [v for v in disp_mins if v is not None]
-        disp_maxs = [m.get("stats", {}).get("los_displacement_max_mm") for m in pair_metas]
-        disp_maxs = [v for v in disp_maxs if v is not None]
-        sources = sorted(set(m.get("source", "") for m in pair_metas))
-        polarizations = sorted(set(m.get("polarization", "") for m in pair_metas))
-        orbits = sorted(set(m.get("orbit_direction", "") for m in pair_metas))
-
-        text = (
-            f"【本地 InSAR 堆栈 - AOI: {aoi_dir.name}】(来源: geo-insar 标准输出)\n"
-            f"- 干涉对数量: {n} 对\n"
-            f"- 时间跨度: {dates[0] if dates else '?'} 至 {dates[-1] if dates else '?'}\n"
-        )
-        if baselines:
-            text += (
-                f"- 平均时间基线: {sum(baselines)/len(baselines):.1f} 天 "
-                f"(范围 {min(baselines)}-{max(baselines)} 天)\n"
-            )
-        if coh_means:
-            text += f"- 整体相干性均值: {sum(coh_means)/len(coh_means):.3f} (中位数 {sorted(coh_means)[len(coh_means)//2]:.3f})\n"
-        if disp_mins and disp_maxs:
-            text += f"- LOS 形变范围: {min(disp_mins):.2f} mm 至 {max(disp_maxs):.2f} mm\n"
-        text += f"- 数据来源: {', '.join(sources)}\n"
-        text += f"- 极化: {', '.join(polarizations)}; 轨道方向: {', '.join(orbits)}\n"
-        text += f"- 数据契约: commons/insar_schema.json v1\n"
-        texts.append(text)
+            pair_lines, bbox = _insar_pair_stats_lines(aoi_dir)
+            if not pair_lines or (bbox and not _intersects(bbox)):
+                continue
+            head = [f"【本地 InSAR 堆栈 - AOI: {aoi_dir.name}】(来源: geo-insar 标准输出，本地实证)"]
+            texts.append("\n".join(head + _insar_2d_decomp_lines(aoi_dir) + pair_lines))
 
     return texts
+
+
+def _geo_insar_figures(bbox) -> List[dict]:
+    """取 geo-insar 对本研究区的 SBAS 时序反演图、速度图与升降轨 2D 速度对比图。
+
+    这些 PNG 未被 insar_metadata.json 的 products 索引（只索引了 .tif 证据），故确定性扫目录收集；
+    仅取 sbas/<burst>/ 与 AOI 级 2D 对比图，不收 sentinel1_insar 逐对图（数量过多）。
+    """
+    _import_commons()
+    try:
+        from commons.insar_broker import find_insar_for_bbox
+    except Exception as e:
+        print(f"[Figures] geo-insar import 失败：{e}")
+        return []
+    try:
+        matches = find_insar_for_bbox(bbox, _GEO_INSAR_DOWNLOADS)
+    except Exception as e:
+        print(f"[Figures] geo-insar 查询失败：{e}")
+        return []
+    import os
+    figs: List[dict] = []
+    for entry in matches:
+        d = entry.get("insar_dir")
+        if not d or not os.path.isdir(d):
+            continue
+        aoi = entry.get("aoi_name", "")
+        # burst → 升/降轨 映射（来自 2D 分解的 ascending/descending.velocity 路径）
+        orbit = {}
+        dp = os.path.join(d, "decomposition_2d.json")
+        if os.path.exists(dp):
+            try:
+                with open(dp, "r", encoding="utf-8") as f:
+                    dd = json.load(f)
+                for key, cn in (("ascending", "升轨"), ("descending", "降轨")):
+                    v = (dd.get(key) or {}).get("velocity", "") or ""
+                    parts = v.split("/")
+                    if len(parts) >= 2:
+                        orbit[parts[1]] = cn
+            except Exception:
+                pass
+        # AOI 级升降轨 2D 速度对比图
+        p = os.path.join(d, "velocity_comparison_2d.png")
+        if os.path.exists(p):
+            figs.append({"path": p,
+                         "caption": f"升降轨 LOS 2D 分解速度对比图（{aoi}，geo-insar InSAR 形变监测）",
+                         "source": "geo-insar"})
+        # SBAS 逐 burst：年均速率图 + 特征点位时序反演图
+        sbas_dir = os.path.join(d, "sbas")
+        if os.path.isdir(sbas_dir):
+            for burst in sorted(os.listdir(sbas_dir)):
+                bd = os.path.join(sbas_dir, burst)
+                if not os.path.isdir(bd):
+                    continue
+                tag = orbit.get(burst, burst)
+                vm = os.path.join(bd, "velocity_map.png")
+                if os.path.exists(vm):
+                    figs.append({"path": vm,
+                                 "caption": f"SBAS 时序反演—年均形变速率图（{tag} {burst}，{aoi}，geo-insar）",
+                                 "source": "geo-insar"})
+                ts = os.path.join(bd, "timeseries_points.png")
+                if os.path.exists(ts):
+                    figs.append({"path": ts,
+                                 "caption": f"SBAS 时序反演—特征点位形变时序（{tag} {burst}，{aoi}，geo-insar）",
+                                 "source": "geo-insar"})
+    return figs
 
 
 def fetch_direct(category_id: str, lat: float, lon: float,
                  min_lon: float, min_lat: float,
                  max_lon: float, max_lat: float) -> List[str]:
     """
-    对支持的类别调用对应直连 API，返回原始文本列表。
-    不支持的类别返回空列表（降级到 Tavily）。
+    [向后兼容薄封装] 按声明式消费契约（consumption.CHAPTER_CONTRACT）取某章节文本，
+    丢弃来源层级仅返回文本列表。需要层级标注的调用方请直接用 consumption.consume_chapter。
+    不支持/无数据的类别返回空列表（降级到 Tavily）。
     """
-    if category_id == "climate":
-        return fetch_climate(lat, lon)
-    elif category_id == "geography":
-        # 地理与地形地貌:直连 SRTM 高程 + data-colle 地形资料 + geo-stru 地形构造解译(含高程范围/线性体)
-        return (fetch_geography(lat, lon, min_lon, min_lat, max_lon, max_lat)
-                + fetch_datacolle_section("geography", min_lon, min_lat, max_lon, max_lat)
-                + fetch_structural_local(min_lon, min_lat, max_lon, max_lat))
-    elif category_id == "geology":
-        # 地质章节:直连地质数据 + geo-stru 本地构造解译 + data-colle 地质资料 + geo-model3d 成矿建模小节(方向四)
-        return (fetch_geology(lat, lon)
-                + fetch_structural_local(min_lon, min_lat, max_lon, max_lat)
-                + fetch_datacolle_section("geology", min_lon, min_lat, max_lon, max_lat)
-                + geo_model3d_modeling_summary(_bbox(min_lon, min_lat, max_lon, max_lat)))
-    elif category_id == "geophysics":
-        # 地球物理章节:从 data-colle 读取本研究区物探资料
-        return fetch_datacolle_section("geophysics", min_lon, min_lat, max_lon, max_lat)
-    elif category_id == "geochemistry":
-        # 地球化学章节:data-colle 资料文本 + geo-geochem 本地异常实证（追加，不替换）
-        return (fetch_datacolle_section("geochemistry", min_lon, min_lat, max_lon, max_lat)
-                + fetch_geochem_summary_text(min_lon, min_lat, max_lon, max_lat))
-    elif category_id == "hydrology":
-        return fetch_hydrology(min_lon, min_lat, max_lon, max_lat)
-    elif category_id == "insar_deformation":
-        return fetch_insar_local(lat, lon, min_lon, min_lat, max_lon, max_lat)
-    elif category_id == "remote_sensing":
-        # 遥感影像章节:geo-analyser 蚀变分析 + geo-exploration 矿产深部探测
-        return (fetch_alteration_local(min_lon, min_lat, max_lon, max_lat)
-                + fetch_deep_detection_local(min_lon, min_lat, max_lon, max_lat))
-    return []
+    from .consumption import consume_chapter
+    res = consume_chapter(category_id, lat, lon, min_lon, min_lat, max_lon, max_lat)
+    return [t for t, _level in res["texts"]]
 
 
 def _strike_group(deg: float) -> str:

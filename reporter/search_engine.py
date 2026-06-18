@@ -14,15 +14,12 @@ from jinja2 import Environment, FileSystemLoader
 from .categories import SearchResult, SearchCategory, DataPoint, Figure, get_all_categories
 from .geocoder import LocationContext
 from .cache import CacheLayer
-from .data_sources import fetch_direct, collect_subsystem_figures, SUPPORTED as DIRECT_SUPPORTED
+from .data_sources import collect_subsystem_figures
+from .consumption import consume_chapter, CHAPTER_CONTRACT
 
 
 class SearchEngineError(Exception):
     pass
-
-
-# 子系统本地实证在原始文本中的特征标记（data_sources 注入）
-_SUBSYSTEM_MARKERS = ("子系统标准输出", "本地实证", "优先于 Web", "优先于Web")
 
 
 def _level_label(levels: set) -> str:
@@ -133,21 +130,20 @@ class SearchEngine:
         texts: List[str] = []
         levels: set = set()
 
-        # 层1：直连权威 API（P2）
-        if category.id in DIRECT_SUPPORTED:
-            direct = fetch_direct(
+        # 层1：声明式消费契约（直连 API + 子系统本地实证），每段文本显式携带来源层级
+        if category.id in CHAPTER_CONTRACT:
+            consumed = consume_chapter(
                 category.id,
                 location.centroid_lat, location.centroid_lon,
                 location.min_lon, location.min_lat,
                 location.max_lon, location.max_lat
             )
+            direct = consumed["texts"]  # [(text, level), ...]
             if direct:
-                print(f"[DirectAPI] {category.id} 获取 {len(direct)} 条直连数据")
-                texts.extend(direct)
-                # 区分"子系统本地实证"与普通直连 API
-                if any(any(m in t for m in _SUBSYSTEM_MARKERS) for t in direct):
-                    levels.add("子系统本地实证")
-                levels.add("直连API")
+                print(f"[Consume] {category.id} 获取 {len(direct)} 条契约数据")
+                for t, level in direct:
+                    texts.append(t)
+                    levels.add(level)  # 层级由 provider 显式声明，不再字符串嗅探
 
         # 层2：缓存（P1）
         cached = self.cache.get(

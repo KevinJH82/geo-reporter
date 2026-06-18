@@ -251,11 +251,55 @@
                     </label>
                 </div>
 
-                <!-- 矿种输入 -->
+                <!-- 矿种选择 -->
                 <div id="mineralGroup" style="display:none">
                     <label class="block text-sm font-semibold text-slate-700 mb-2" for="mineralType">目标矿种 (可选)</label>
-                    <input class="w-full px-4 py-3 rounded-lg sh-input text-slate-900 placeholder:text-slate-400" id="mineralType" placeholder="例如：锂矿、金矿、铜精矿..." type="text" maxlength="50">
-                    <p class="text-xs text-slate-400 mt-2">填写后，报告将自动整合该矿种的全球分布规律与勘探模型分析。</p>
+                    <select class="w-full px-4 py-3 rounded-lg sh-input text-slate-900" id="mineralType" onchange="onMineralChange()">
+                        <option value="">不限 / 未指定</option>
+                        <optgroup label="贵金属">
+                            <option value="金">金</option>
+                            <option value="银">银</option>
+                            <option value="铂族金属(PGE)">铂族金属 (PGE)</option>
+                        </optgroup>
+                        <optgroup label="有色金属">
+                            <option value="铜">铜</option>
+                            <option value="铅">铅</option>
+                            <option value="锌">锌</option>
+                            <option value="镍">镍</option>
+                            <option value="钴">钴</option>
+                            <option value="钨">钨</option>
+                            <option value="锡">锡</option>
+                            <option value="钼">钼</option>
+                            <option value="锑">锑</option>
+                            <option value="铝土矿">铝土矿</option>
+                        </optgroup>
+                        <optgroup label="黑色金属">
+                            <option value="铁">铁</option>
+                            <option value="锰">锰</option>
+                            <option value="铬">铬</option>
+                            <option value="钛">钛</option>
+                            <option value="钒">钒</option>
+                        </optgroup>
+                        <optgroup label="能源与新能源金属">
+                            <option value="锂">锂</option>
+                            <option value="铀">铀</option>
+                            <option value="稀土">稀土</option>
+                            <option value="铍">铍</option>
+                            <option value="铌钽">铌钽</option>
+                        </optgroup>
+                        <optgroup label="非金属矿产">
+                            <option value="金刚石">金刚石</option>
+                            <option value="石墨">石墨</option>
+                            <option value="萤石">萤石</option>
+                            <option value="磷">磷（磷矿）</option>
+                            <option value="钾盐">钾盐</option>
+                            <option value="硼">硼</option>
+                            <option value="硫铁矿">硫铁矿</option>
+                        </optgroup>
+                        <option value="__other__">其它（手动输入）…</option>
+                    </select>
+                    <input class="w-full px-4 py-3 rounded-lg sh-input text-slate-900 placeholder:text-slate-400 mt-2" id="mineralTypeCustom" placeholder="请输入目标矿种，如：钴土矿、铯榴石…" type="text" maxlength="50" style="display:none">
+                    <p class="text-xs text-slate-400 mt-2">选择后，报告将自动整合该矿种的全球分布规律与勘探模型分析。</p>
                 </div>
 
                 <!-- 操作按钮 -->
@@ -439,8 +483,28 @@
             }
         }
 
+        function onMineralChange() {
+            const sel = document.getElementById('mineralType');
+            const custom = document.getElementById('mineralTypeCustom');
+            if (sel.value === '__other__') {
+                custom.style.display = 'block';
+                custom.focus();
+            } else {
+                custom.style.display = 'none';
+                custom.value = '';
+            }
+        }
+
+        function getMineral() {
+            const sel = document.getElementById('mineralType');
+            if (sel.value === '__other__') {
+                return document.getElementById('mineralTypeCustom').value.trim();
+            }
+            return sel.value.trim();
+        }
+
         async function streamReportGeneration(taskId) {
-            const mineral = document.getElementById('mineralType').value.trim();
+            const mineral = getMineral();
             const url = mineral ? `/api/run/${taskId}?mineral=${encodeURIComponent(mineral)}` : `/api/run/${taskId}`;
             try {
                 const response = await fetch(url);
@@ -590,6 +654,8 @@
             document.getElementById('uploadBtn').disabled = true;
             document.getElementById('mineralGroup').style.display = 'none';
             document.getElementById('mineralType').value = '';
+            const _mc = document.getElementById('mineralTypeCustom');
+            if (_mc) { _mc.value = ''; _mc.style.display = 'none'; }
             clearError();
         }
     </script>

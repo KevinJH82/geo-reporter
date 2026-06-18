@@ -20,7 +20,9 @@ from jinja2 import Environment, FileSystemLoader
 from .categories import Figure, get_all_categories
 from .basemap import render_basemap
 from .data_sources import (_import_commons, GEO_STRU_OUTPUTS, DATACOLLE_OUTPUTS,
-                           GEO_ANALYSER_OUTPUTS, GEO_EXPLORATION_OUTPUTS)
+                           GEO_ANALYSER_OUTPUTS, GEO_EXPLORATION_OUTPUTS,
+                           GEO_GEOPHYS_OUTPUTS, GEO_GEOCHEM_OUTPUTS, GEO_MODEL3D_OUTPUTS,
+                           GEO_DEPOSITS_OUTPUTS, GEO_DRILL_OUTPUTS)
 
 
 def _bbox(location):
@@ -44,8 +46,71 @@ def get_prospecting_targets(location) -> List[dict]:
     return matches[0].get("prospecting_targets", [])
 
 
-def _reason_for(grade: str, value=None) -> str:
-    """确定性兜底理由（仅在 LLM 未给出 target 理由时使用，基于深部潜力值）。"""
+def get_known_deposits(location) -> List[dict]:
+    """取与本研究区相交的已知矿点（deposits 标签）→ [{name,commodity,deposit_type,lon,lat}]，无则空。"""
+    _import_commons()
+    try:
+        from commons.deposits_broker import find_deposits_for_bbox, get_points
+    except Exception:
+        return []
+    try:
+        matches = find_deposits_for_bbox(_bbox(location), GEO_DEPOSITS_OUTPUTS)
+    except Exception:
+        return []
+    return get_points(matches[0]) if matches else []
+
+
+def get_drill_evidence(location) -> dict:
+    """取与本研究区相交的钻探布孔/反馈（geo-drill）→ {holes:[...], feedback:[...]}，无则空 dict。"""
+    _import_commons()
+    try:
+        from commons.drill_broker import find_drill_for_bbox, get_holes, get_feedback
+    except Exception:
+        return {}
+    try:
+        matches = find_drill_for_bbox(_bbox(location), GEO_DRILL_OUTPUTS)
+    except Exception:
+        return {}
+    if not matches:
+        return {}
+    entry = matches[0]
+    return {"holes": get_holes(entry), "feedback": get_feedback(entry)}
+
+
+def get_drill_targets(location) -> List[dict]:
+    """
+    把 geo-drill AI 计划孔（planned_holes）转为与深部靶区同构的点位，作为靶区推荐主源。
+    按评分降序取前若干、重新编号，保留真实坐标/目标深度，供分级与制图。无计划孔→空。
+    """
+    holes = (get_drill_evidence(location).get("holes") or [])
+    if not holes:
+        return []
+
+    def _score(h):
+        s = h.get("score")
+        return s if isinstance(s, (int, float)) else 0.0
+
+    out = []
+    for i, h in enumerate(sorted(holes, key=_score, reverse=True), 1):
+        lon, lat = h.get("lon"), h.get("lat")
+        if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+            continue
+        out.append({"rank": i, "longitude": lon, "latitude": lat,
+                    "value": _score(h), "hole_id": h.get("hole_id"),
+                    "target_depth_m": h.get("target_depth_m"), "source": "drill"})
+    return out
+
+
+def _reason_for(grade: str, value=None, source: str = "exploration") -> str:
+    """确定性兜底理由（仅在 LLM 未给出 target 理由时使用）。drill 来源基于布孔评分，深部探测来源基于潜力值。"""
+    if source == "drill":
+        vtxt = f"钻探布孔综合评分 {value:.3f}，" if isinstance(value, (int, float)) else ""
+        return {
+            "A": f"{vtxt}处于区内最高档，AI 布孔优先级最高，建议优先实施验证。",
+            "B": f"{vtxt}处于较高档，布孔优先级较高，建议安排实施。",
+            "C": f"{vtxt}处于中等档，需补充查证后再定取舍。",
+            "D": f"{vtxt}处于偏低档，支撑有限，建议先行地表查证。",
+        }.get(grade, "")
     vtxt = f"深部成矿潜力指数 {value:.3f}，" if isinstance(value, (int, float)) else ""
     return {
         "A": f"{vtxt}处于区内最高档，深部潜力突出，建议优先工程验证。",
@@ -55,8 +120,9 @@ def _reason_for(grade: str, value=None) -> str:
     }.get(grade, "")
 
 
-def _grade_from_potential(raw: List[dict], max_targets: int = 6) -> List[dict]:
-    """确定性兜底：对真实 geo-exploration 靶区按潜力值归一化分级 A-D（含真实坐标）。"""
+def _grade_from_potential(raw: List[dict], max_targets: int = 6,
+                          source: str = "exploration") -> List[dict]:
+    """确定性兜底：对真实靶区（drill 计划孔 / exploration 深部靶区）按评分归一化分级 A-D（含真实坐标）。"""
     items = raw[:max_targets]
     vals = [t.get("value") or 0 for t in items]
     vmax, vmin = (max(vals), min(vals)) if vals else (1.0, 0.0)
@@ -71,7 +137,9 @@ def _grade_from_potential(raw: List[dict], max_targets: int = 6) -> List[dict]:
             "latitude": t.get("latitude"),
             "value": v,
             "grade": grade,
-            "reason": _reason_for(grade, v),
+            "reason": _reason_for(grade, v, source),
+            "hole_id": t.get("hole_id"),
+            "target_depth_m": t.get("target_depth_m"),
         })
     return out
 
@@ -107,7 +175,8 @@ def _subsystem_availability(location) -> dict:
     _import_commons()
     bbox = _bbox(location)
     avail = {"structural": False, "datacolle": False, "alteration": False,
-             "exploration": False, "n_targets": 0}
+             "exploration": False, "geophys": False, "geochem": False,
+             "model3d": False, "deposits": False, "drill": False, "n_targets": 0}
     try:
         from commons.structural_broker import find_structural_for_bbox
         avail["structural"] = bool(find_structural_for_bbox(bbox, GEO_STRU_OUTPUTS))
@@ -131,6 +200,33 @@ def _subsystem_availability(location) -> dict:
             avail["n_targets"] = len(m[0].get("prospecting_targets", []))
     except Exception:
         pass
+    try:
+        from commons.geophys_broker import find_geophys_for_bbox
+        avail["geophys"] = bool(find_geophys_for_bbox(bbox, GEO_GEOPHYS_OUTPUTS))
+    except Exception:
+        pass
+    try:
+        from commons.geochem_broker import find_geochem_for_bbox
+        avail["geochem"] = bool(find_geochem_for_bbox(bbox, GEO_GEOCHEM_OUTPUTS))
+    except Exception:
+        pass
+    try:
+        from commons.model3d_broker import find_model3d_for_bbox
+        avail["model3d"] = bool(find_model3d_for_bbox(bbox, GEO_MODEL3D_OUTPUTS))
+    except Exception:
+        pass
+    try:
+        from commons.deposits_broker import find_deposits_for_bbox, get_points
+        m = find_deposits_for_bbox(bbox, GEO_DEPOSITS_OUTPUTS)
+        avail["deposits"] = bool(m and get_points(m[0]))
+    except Exception:
+        pass
+    try:
+        from commons.drill_broker import find_drill_for_bbox, get_holes, get_feedback
+        m = find_drill_for_bbox(bbox, GEO_DRILL_OUTPUTS)
+        avail["drill"] = bool(m and (get_holes(m[0]) or get_feedback(m[0])))
+    except Exception:
+        pass
     return avail
 
 
@@ -149,7 +245,8 @@ def _cap_grade(grade: str, dimensions: List[dict], avail: dict) -> Tuple[str, bo
     g = grade if grade in _GRADE_ORDER else "C"
     levels = [str(d.get("level", "")).strip() for d in (dimensions or [])]
     weak = sum(1 for l in levels if l in ("低", "缺"))
-    has_local = any(avail.get(k) for k in ("structural", "datacolle", "alteration", "exploration"))
+    has_local = any(avail.get(k) for k in ("structural", "datacolle", "alteration", "exploration",
+                                            "geophys", "geochem", "model3d", "deposits", "drill"))
 
     best_allowed = "A"
     reasons: List[str] = []
@@ -197,7 +294,14 @@ def evaluate_synthesis(location, mineral_type: str, search_results: Dict,
     """
     evidence = _gather_evidence(search_results)
     avail = _subsystem_availability(location)
-    raw_targets = get_prospecting_targets(location)
+    known_deposits = get_known_deposits(location)       # 已知矿点（靶区套合佐证）
+    drill_evidence = get_drill_evidence(location)       # 钻探布孔/反馈（验证闭环）
+    # 靶区点位来源优先级：geo-drill AI 计划孔（子系统链末端、最贴近实施）> geo-exploration 深部探测
+    drill_targets = get_drill_targets(location)
+    if drill_targets:
+        raw_targets, target_source = drill_targets, "drill"
+    else:
+        raw_targets, target_source = get_prospecting_targets(location), "exploration"
     has_deep = bool(raw_targets)
 
     # 传给 LLM 的真实靶区（仅 rank+坐标，等级/理由由 LLM 结合证据给出）
@@ -221,13 +325,17 @@ def evaluate_synthesis(location, mineral_type: str, search_results: Dict,
             subsystems=avail,
             has_deep_targets=has_deep,
             deep_targets=deep_targets_in,
+            known_deposits=known_deposits[:12],
+            drill_holes=(drill_evidence.get("holes") or [])[:8],
+            drill_feedback=(drill_evidence.get("feedback") or [])[:8],
+            target_source=target_source,
         )
         parsed = _run_llm(prompt, timeout)
     except Exception as e:
         print(f"[Synthesis] 模板渲染/调用异常：{e}")
 
     confidence = _finalize_confidence(parsed, avail) if parsed else None
-    target_figure = _build_figure(location, parsed, raw_targets, has_deep)
+    target_figure = _build_figure(location, parsed, raw_targets, has_deep, target_source)
     return target_figure, confidence
 
 
@@ -248,14 +356,15 @@ def _finalize_confidence(parsed: Dict, avail: dict) -> Dict:
 
 
 def _build_figure(location, parsed: Optional[Dict], raw_targets: List[dict],
-                  has_deep: bool) -> Optional[Figure]:
+                  has_deep: bool, target_source: str = "exploration") -> Optional[Figure]:
     """
     构建靶区推荐图：
-    - 有真实深部靶区：底图叠加热力靶区点（坐标真实），等级/理由优先取 LLM，缺则确定性兜底。
-    - 无深部靶区：仅画研究区框，输出「有利地段」定性条目（无精确坐标），标注待验证。
+    - 有真实靶区（drill 计划孔优先，否则 exploration 深部靶区）：底图叠加热力靶区点（坐标真实），
+      等级/理由优先取 LLM，缺则确定性兜底。
+    - 无任何真实靶区：仅画研究区框，输出「有利地段」定性条目（无精确坐标），标注待验证。
     """
     if has_deep and raw_targets:
-        targets = _grade_from_potential(raw_targets)  # 兜底坐标+等级
+        targets = _grade_from_potential(raw_targets, source=target_source)  # 兜底坐标+等级
         # 用 LLM 的 target_assessment 覆盖等级/理由（按 rank 对齐）
         if parsed:
             assess = {a.get("rank"): a for a in (parsed.get("target_assessment") or [])}
@@ -269,14 +378,17 @@ def _build_figure(location, parsed: Optional[Dict], raw_targets: List[dict],
         path = render_basemap(location, width_px=900, height_px=720, targets=targets)
         if not path:
             return None
+        basis = ("AI 钻探布孔（geo-drill），孔位即推荐靶区" if target_source == "drill"
+                 else "深部探测（geo-exploration）")
         fig = Figure(
             path=path,
-            caption=f"靶区推荐图（基于深部探测，共圈定 {len(targets)} 个靶区，按置信等级 A>B>C>D 排序）",
+            caption=f"靶区推荐图（基于{basis}，共圈定 {len(targets)} 个靶区，按置信等级 A>B>C>D 排序）",
             source="",
         )
         fig.mode = "targets"
         fig.targets = targets
         fig.favorable_areas = []
+        fig.target_source = target_source
         return fig
 
     # 无深部靶区：定性有利地段，绝不伪造坐标
