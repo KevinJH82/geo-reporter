@@ -159,6 +159,8 @@ def parse_tabular(file_path: str, point_buffer_deg: float = DEFAULT_POINT_BUFFER
     area_name = file_name
     if name_col and not df[name_col].dropna().empty:
         area_name = str(df[name_col].dropna().iloc[0]).strip() or file_name
+    # 规范化研究区名称中独立出现的 aoi → AOI
+    area_name = re.sub(r"\baoi\b", "AOI", area_name, flags=re.IGNORECASE)
 
     # 描述
     description = ""

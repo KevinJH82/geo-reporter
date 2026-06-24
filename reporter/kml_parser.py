@@ -5,6 +5,7 @@ KML Parser Module
 使用 lxml 直接解析，兼容所有 fastkml 版本。
 """
 
+import re
 import zipfile
 import tempfile
 from pathlib import Path
@@ -166,6 +167,8 @@ def _extract_placemark_metadata(element, ns: str) -> Tuple[str, str]:
     name_el = _find_tag(element, "name", ns)
     if name_el is not None and name_el.text:
         name = name_el.text.strip()
+        # 规范化研究区名称中独立出现的 aoi → AOI
+        name = re.sub(r"\baoi\b", "AOI", name, flags=re.IGNORECASE)
 
     desc_el = _find_tag(element, "description", ns)
     if desc_el is not None and desc_el.text:
